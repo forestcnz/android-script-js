@@ -1,0 +1,7 @@
+{
+    "name": "手势演示",
+    "desc": "内置示例：演示坐标点击、滑动、长按与折线手势",
+    "target": "",
+    "designSize": null,
+    "loop": { "count": 1, "interval": 0 }
+}

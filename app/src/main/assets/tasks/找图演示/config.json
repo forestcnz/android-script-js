@@ -1,0 +1,7 @@
+{
+    "name": "找图演示",
+    "desc": "内置示例：截屏授权 → 保存截图 → 按模板图片查找并点击",
+    "target": "",
+    "designSize": null,
+    "loop": { "count": 1, "interval": 0 }
+}

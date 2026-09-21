@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动图标：占位矢量图（后续替换为正式图标） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 背景圆角方块 -->
+    <path
+        android:fillColor="#1E88E5"
+        android:pathData="M16,10h76a6,6 0 0 1 6,6v76a6,6 0 0 1 -6,6h-76a6,6 0 0 1 -6,-6v-76a6,6 0 0 1 6,-6z" />
+    <!-- 前景：脚本符号 </> -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M44,40 L30,54 L44,68" />
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M64,40 L78,54 L64,68" />
+    <path
+        android:strokeColor="#FFC107"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:pathData="M58,34 L50,74" />
+</vector>

@@ -1,0 +1,79 @@
+// app 模块：宿主 App（任务管理/编辑器/悬浮工具）+ 各 core 包
+// AGP 9.0 使用内置 Kotlin 编译（无需独立 kotlin-android 插件）
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+android {
+    namespace = "com.script.js"
+    compileSdk = 36          // quickjs-kt 1.0.5 要求依赖方 compileSdk >= 36
+
+    defaultConfig {
+        applicationId = "com.script.js"
+        minSdk = 24          // dispatchGesture 需要 API 24+
+        targetSdk = 35
+        versionCode = 1
+        versionName = "0.1.0"
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    // 打包导出需要：native 库在安装时解压（否则重打包后对齐丢失会导致 INSTALL_FAILED_INVALID_APK）
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    buildFeatures {
+        compose = true
+        aidl = true          // Shizuku UserService 需要 AIDL 接口
+    }
+}
+
+dependencies {
+    // Compose BOM 统一管理 Compose 版本
+    val composeBom = platform("androidx.compose:compose-bom:2025.01.00")
+    implementation(composeBom)
+
+    implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("androidx.activity:activity-compose:1.9.3")
+
+    // QuickJS 脚本引擎（quickjs-kt，ES2020+，含各 ABI 原生库）
+    // 1.0.8+ 使用 Kotlin 2.4 编译，超出 AGP 9.0 内置 Kotlin 2.2.0 的元数据读取上限，故锁 1.0.5
+    implementation("io.github.dokar3:quickjs-kt:1.0.5")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // 定时任务（WorkManager 到点拉起任务）
+    implementation("androidx.work:work-runtime-ktx:2.10.5")
+
+    // 任务打包导出独立 APK：APK 重签名（纯 Java 库）
+    implementation("com.android.tools.build:apksig:8.7.3")
+
+    // 静默截屏增强：Shizuku（可选，未安装时自动降级到 MediaProjection）
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
+
+    // OCR：MLKit 文字识别（中文模型内置，约 10MB；设计文档的备选方案，避免 PaddleOCR 15-20MB 模型）
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+
+    debugImplementation("androidx.compose.ui:ui-tooling")
+}
