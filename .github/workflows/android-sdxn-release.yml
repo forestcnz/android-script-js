@@ -1,0 +1,79 @@
+name: Android SDXN build and release
+
+on:
+  push:
+    branches:
+      - sdxn
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-sdxn-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.6.1'
+
+      - name: Build SDXN debug APK
+        run: >-
+          gradle :app:assembleDebug
+          -PappVersionCode=${{ github.run_number }}
+          -PappVersionName=1.0.${{ github.run_number }}-sdxn
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          mkdir -p dist
+          short_sha="${GITHUB_SHA::7}"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/sdxn-${short_sha}-debug.apk"
+          cd dist
+          sha256sum *.apk > SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdxn-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          tag="sdxn-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-${short_sha}"
+          title="神雕侠侣助手 ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT} (${short_sha})"
+          notes=$(cat <<EOF
+          Automated SDXN debug build from the sdxn branch.
+
+          - Commit: ${GITHUB_SHA}
+          - Version code: ${GITHUB_RUN_NUMBER}
+          - Package: com.sdxn.assistant
+          - APK is debug-signed. Uninstall the previous SDXN build if CI signing keys differ.
+          EOF
+          )
+          gh release create "$tag" dist/* \
+            --prerelease \
+            --title "$title" \
+            --notes "$notes" \
+            --target "$GITHUB_SHA"
