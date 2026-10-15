@@ -109,6 +109,7 @@
 | 4.4-d | 取色器：取像素生成 `findColor` 颜色串 | `PickerOverlay`（COLOR 模式，依赖截屏） | 早前实测；本轮 `requestBlocking` 修复后，静默通道下取色不再需要录屏弹窗 | ✅ |
 | 4.4-e | 模板截取工具：截屏→框选→存入当前任务 `images/` | `TemplateCaptureActivity.kt` | 早前实测 | ✅ |
 | 4.4-f | （用户追加）取色/取坐标全部可在悬浮窗内完成；悬浮窗可选择任务并运行 | `PickerOverlay` 就地切换模式、`FloatyManager` 任务面板（`taskProvider/onTaskSelected/onStopClicked`） | 早前实测：悬浮球展开任务列表并运行 | ✅ |
+| 4.4-g | 框选截图：悬浮窗「去截图」→拖拽选区→重命名保存 | `PickerOverlay` SCREENSHOT 模式、保存窗口、`ScriptRunner` 保存路径日志 | 模拟器实测 `master_shot_001.png (500×350)` 与完整路径日志 | ✅ |
 
 ### 4.5 调度与稳定性
 

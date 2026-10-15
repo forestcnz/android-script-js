@@ -7,20 +7,31 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.os.Build
+import android.text.InputType
 import android.util.Log
 import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import java.io.File
 import android.widget.Toast
 import com.script.js.core.image.ScreenCapture
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.abs
 
 /**
- * 坐标拾取器 / 取色器：全屏透明悬浮层，拖动准星取点，点击生成脚本代码。
+ * 坐标拾取器 / 取色器 / 截图器：全屏透明悬浮层，拖动准星取点，点击生成脚本代码。
  * - 坐标模式：生成 `click(x, y);`
  * - 取色模式：从最近一帧截屏读取该点像素，生成 `images.findColor(captureScreen(), "#rrggbb", ...)`
  *
@@ -36,17 +47,25 @@ object PickerOverlay {
         POINT,
 
         /** 取像素颜色，生成 findColor 颜色串 */
-        COLOR
+        COLOR,
+
+        /** 拖拽框选屏幕区域并保存截图 */
+        SCREENSHOT
     }
 
     /** 拾取结果回调（宿主写入运行日志等） */
     @Volatile
     var onPicked: ((String) -> Unit)? = null
 
+    /** 截图保存成功回调（宿主写入运行日志等） */
+    @Volatile
+    var onScreenshotSaved: ((File) -> Unit)? = null
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     private var windowManager: WindowManager? = null
     private var pickerView: PickerView? = null
+    private var savePromptView: FrameLayout? = null
+    private var savePromptWindowManager: WindowManager? = null
 
     fun isShowing(): Boolean = pickerView != null
 
@@ -60,15 +79,19 @@ object PickerOverlay {
             Log.w(TAG, "拾取器需要悬浮窗权限")
             return false
         }
-        // 取色依赖截屏：**任意通道**都不可用时才先申请授权（静默通道下无需授权，直接打开）
-        if (mode == Mode.COLOR && !ScreenCapture.captureAvailable(context)) {
+        // 取色/截图依赖截屏：**任意通道**都不可用时才先申请授权（静默通道下无需授权，直接打开）
+        if ((mode == Mode.COLOR || mode == Mode.SCREENSHOT) && !ScreenCapture.captureAvailable(context)) {
             Thread {
                 val ok = ScreenCapture.requestBlocking()
                 mainHandler.post {
                     if (ok) {
-                        show(context, Mode.COLOR)
+                        show(context, mode)
                     } else {
-                        Toast.makeText(context, "取色需要截屏授权", Toast.LENGTH_LONG).show()
+                        Toast.makeText(
+                            context,
+                            if (mode == Mode.COLOR) "取色需要截屏授权" else "截图需要截屏授权",
+                            Toast.LENGTH_LONG
+                        ).show()
                     }
                 }
             }.start()
@@ -110,6 +133,191 @@ object PickerOverlay {
         }
         pickerView = null
         windowManager = null
+    }
+
+    /** 关闭截图重命名窗口 */
+    fun hideSavePrompt() {
+        savePromptView?.let { view ->
+            try {
+                savePromptWindowManager?.removeView(view)
+            } catch (_: Exception) {
+            }
+        }
+        savePromptView = null
+        savePromptWindowManager = null
+    }
+
+    /** 打开截图重命名窗口；文件保存到应用专属外部存储 screenshots/ */
+    private fun showSavePrompt(context: Context, bitmap: Bitmap) {
+        hideSavePrompt()
+        hide()
+        val density = context.resources.displayMetrics.density
+        val padding = (18f * density).toInt()
+        val root = FrameLayout(context).apply {
+            setBackgroundColor(0xEE101014.toInt())
+            isClickable = true
+            isFocusable = true
+        }
+        val content = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding, padding, padding)
+        }
+        val title = TextView(context).apply {
+            text = "保存截图"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+        }
+        val input = EditText(context).apply {
+            setText(defaultScreenshotName())
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setSelection(text.length)
+            setTextColor(Color.WHITE)
+            hint = "文件名"
+        }
+        val pathHint = TextView(context).apply {
+            text = screenshotDir(context).absolutePath
+            setTextColor(0xFFBBBBBB.toInt())
+            textSize = 11f
+        }
+        val buttons = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        val cancelButton = Button(context).apply { text = "取消" }
+        val saveButton = Button(context).apply { text = "保存" }
+        buttons.addView(
+            cancelButton,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        buttons.addView(
+            saveButton,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        val fieldGap = (14f * density).toInt()
+        content.addView(title)
+        content.addView(
+            input,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = fieldGap }
+        )
+        content.addView(
+            pathHint,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = (8f * density).toInt() }
+        )
+        content.addView(
+            buttons,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = fieldGap }
+        )
+        root.addView(
+            content,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                gravity = Gravity.CENTER
+                marginStart = (24f * density).toInt()
+                marginEnd = (24f * density).toInt()
+            }
+        )
+
+        cancelButton.setOnClickListener { hideSavePrompt() }
+        saveButton.setOnClickListener {
+            val rawName = input.text.toString().trim()
+            val name = sanitizeScreenshotName(rawName)
+            if (name == null) {
+                input.error = "请输入合法文件名"
+                return@setOnClickListener
+            }
+            saveButton.isEnabled = false
+            input.isEnabled = false
+            Thread {
+                val saved = saveScreenshot(context, bitmap, name)
+                mainHandler.post {
+                    if (saved == null) {
+                        saveButton.isEnabled = true
+                        input.isEnabled = true
+                        Toast.makeText(context, "截图保存失败", Toast.LENGTH_LONG).show()
+                    } else {
+                        hideSavePrompt()
+                        Toast.makeText(
+                            context,
+                            "已保存 ${saved.name} (${bitmap.width}×${bitmap.height})",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        onScreenshotSaved?.invoke(saved)
+                    }
+                }
+            }.start()
+        }
+
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        else
+            @Suppress("DEPRECATION")
+            WindowManager.LayoutParams.TYPE_PHONE
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            windowType,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+        try {
+            wm.addView(root, params)
+            savePromptView = root
+            savePromptWindowManager = wm
+            input.requestFocus()
+        } catch (e: Exception) {
+            Log.w(TAG, "截图保存窗口显示失败: ${e.message}")
+            Toast.makeText(context, "截图保存窗口显示失败", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun screenshotDir(context: Context): File {
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        return File(base, "screenshots").apply { mkdirs() }
+    }
+
+    private fun defaultScreenshotName(): String =
+        "screenshot_${android.text.format.DateFormat.format("yyyyMMdd_HHmmss", System.currentTimeMillis())}"
+
+    private fun sanitizeScreenshotName(rawName: String): String? {
+        if (rawName.isEmpty() || rawName.length > 100) return null
+        if (rawName.contains('/') || rawName.contains('\\')) return null
+        val name = if (rawName.endsWith(".png", true)) rawName else "$rawName.png"
+        return name.takeIf { !Regex("[\"*:<>?|\\u0000-\\u001F]").containsMatchIn(it) }
+    }
+
+    private fun saveScreenshot(context: Context, bitmap: Bitmap, requestedName: String): File? {
+        val dir = screenshotDir(context)
+        var target = File(dir, requestedName)
+        if (target.exists()) {
+            val base = requestedName.removeSuffix(".png")
+            var index = 1
+            while (target.exists()) {
+                target = File(dir, "${base}_$index.png")
+                index += 1
+            }
+        }
+        return try {
+            target.outputStream().use { out ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            }
+            target
+        } catch (e: Exception) {
+            Log.w(TAG, "截图保存失败: ${e.message}")
+            target.delete()
+            null
+        }
     }
 
     /** 生成结果：复制到剪贴板 + 提示 + 回调宿主 */
@@ -156,6 +364,20 @@ object PickerOverlay {
         /** 截屏不可用（未授权）时提示，而不是一直显示“取色中” */
         private var captureMissing = false
 
+        private var selectionStartX = 0f
+        private var selectionStartY = 0f
+        private var selectionEndX = 0f
+        private var selectionEndY = 0f
+        private var hasSelection = false
+        private var isSelecting = false
+        private var isCapturing = false
+
+        /** 截图确认按钮区域 */
+        private val saveRect = RectF()
+
+        /** 截图重选按钮区域 */
+        private val resetRect = RectF()
+
         /** 悬浮层在屏幕上的原点：窗口通常从状态栏下方开始，需换算成屏幕坐标 */
         private val location = IntArray(2)
 
@@ -189,6 +411,14 @@ object PickerOverlay {
         private val swatchPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
+        private val dimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x99000000.toInt()
+            style = Paint.Style.FILL
+        }
+        private val selectionFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0x00FFFFFF
+            style = Paint.Style.FILL
+        }
 
         init {
             // 初始位置取屏幕中心
@@ -205,6 +435,10 @@ object PickerOverlay {
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             getLocationOnScreen(location)
+            if (mode == Mode.SCREENSHOT) {
+                drawScreenshot(canvas)
+                return
+            }
             val gap = 9f * density
             val arm = 46f * density
             // 准星（中心留空，避免遮挡被采样像素）
@@ -283,6 +517,59 @@ object PickerOverlay {
             )
         }
 
+        private fun drawScreenshot(canvas: Canvas) {
+            val btnW = 76f * density
+            val btnH = 38f * density
+            val btnGap = 10f * density
+            val margin = 18f * density
+            cancelRect.set(width - btnW - margin, margin, width - margin, margin + btnH)
+            resetRect.set(cancelRect.left - btnW - btnGap, margin, cancelRect.left - btnGap, margin + btnH)
+            saveRect.set(resetRect.left - btnW - btnGap, margin, resetRect.left - btnGap, margin + btnH)
+
+            if (hasSelection) {
+                val left = min(selectionStartX, selectionEndX)
+                val top = min(selectionStartY, selectionEndY)
+                val right = max(selectionStartX, selectionEndX)
+                val bottom = max(selectionStartY, selectionEndY)
+                canvas.drawRect(0f, 0f, width.toFloat(), top, dimPaint)
+                canvas.drawRect(0f, bottom, width.toFloat(), height.toFloat(), dimPaint)
+                canvas.drawRect(0f, top, left, bottom, dimPaint)
+                canvas.drawRect(right, top, width.toFloat(), bottom, dimPaint)
+                canvas.drawRect(left, top, right, bottom, selectionFillPaint)
+                canvas.drawRect(left, top, right, bottom, crossPaint)
+            } else {
+                canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+            }
+
+            val captureText = if (isCapturing) "截图中" else "保存"
+            drawButton(canvas, saveRect, captureText)
+            drawButton(canvas, resetRect, "重选")
+            drawButton(canvas, cancelRect, "取消")
+
+            val hint = when {
+                isCapturing -> "正在截取所选区域…"
+                hasSelection -> "${selectionWidth()}×${selectionHeight()}，可拖拽调整"
+                else -> "按住并拖动，框选要保存的区域"
+            }
+            val textX = margin
+            val textY = if (saveRect.bottom + 34f * density < height) {
+                saveRect.bottom + 26f * density
+            } else {
+                height - margin
+            }
+            canvas.drawText(hint, textX, textY, subPaint)
+        }
+
+        private fun drawButton(canvas: Canvas, rect: RectF, label: String) {
+            canvas.drawRoundRect(rect, 9f * density, 9f * density, panelPaint)
+            val textX = rect.centerX() - textPaint.measureText(label) / 2
+            canvas.drawText(label, textX, rect.centerY() + 5f * density, textPaint)
+        }
+
+        private fun selectionWidth(): Int = abs(selectionEndX - selectionStartX).toInt()
+
+        private fun selectionHeight(): Int = abs(selectionEndY - selectionStartY).toInt()
+
         @SuppressLint("ClickableViewAccessibility")
         override fun onTouchEvent(event: MotionEvent): Boolean {
             when (event.action) {
@@ -298,11 +585,43 @@ object PickerOverlay {
                     }
                     if (switchRect.contains(event.x, event.y)) {
                         consumedByButton = true
-                        mode = if (mode == Mode.POINT) Mode.COLOR else Mode.POINT
+                        mode = when (mode) {
+                            Mode.POINT -> Mode.COLOR
+                            Mode.COLOR -> Mode.SCREENSHOT
+                            Mode.SCREENSHOT -> Mode.POINT
+                        }
                         hasColor = false
                         captureMissing = false
+                        hasSelection = false
+                        isSelecting = false
+                        isCapturing = false
                         if (mode == Mode.COLOR) sample()
                         invalidate()
+                        return true
+                    }
+                    if (mode == Mode.SCREENSHOT) {
+                        if (saveRect.contains(event.x, event.y) && hasSelection && !isCapturing) {
+                            consumedByButton = true
+                            captureSelection()
+                            return true
+                        }
+                        if (resetRect.contains(event.x, event.y)) {
+                            consumedByButton = true
+                            hasSelection = false
+                            isSelecting = true
+                            selectionStartX = event.x
+                            selectionStartY = event.y
+                            selectionEndX = event.x
+                            selectionEndY = event.y
+                            invalidate()
+                            return true
+                        }
+                        isSelecting = true
+                        hasSelection = false
+                        selectionStartX = event.x
+                        selectionStartY = event.y
+                        selectionEndX = event.x
+                        selectionEndY = event.y
                         return true
                     }
                     return true
@@ -311,6 +630,15 @@ object PickerOverlay {
                     if (abs(event.x - downX) > 6f * density || abs(event.y - downY) > 6f * density) {
                         moved = true
                     }
+                    if (mode == Mode.SCREENSHOT) {
+                        if (isSelecting && !isCapturing) {
+                            selectionEndX = event.x
+                            selectionEndY = event.y
+                            hasSelection = true
+                            invalidate()
+                        }
+                        return true
+                    }
                     px = event.x
                     py = event.y
                     if (mode == Mode.COLOR) sample()
@@ -318,6 +646,16 @@ object PickerOverlay {
                     return true
                 }
                 MotionEvent.ACTION_UP -> {
+                    if (mode == Mode.SCREENSHOT) {
+                        if (isSelecting && !isCapturing) {
+                            isSelecting = false
+                            selectionEndX = event.x
+                            selectionEndY = event.y
+                            hasSelection = selectionWidth() >= 2 && selectionHeight() >= 2
+                        }
+                        invalidate()
+                        return true
+                    }
                     if (!moved && !consumedByButton) {
                         px = event.x
                         py = event.y
@@ -366,6 +704,7 @@ object PickerOverlay {
 
         /** 点击确认：生成代码（坐标为屏幕坐标，与 click/gesture API 一致） */
         private fun confirm() {
+            if (mode == Mode.SCREENSHOT) return
             val x = toScreenX(px)
             val y = toScreenY(py)
             when (mode) {
@@ -386,7 +725,50 @@ object PickerOverlay {
                     val hex = "#%06x".format(color and 0xFFFFFF)
                     onResult("images.findColor(captureScreen(), \"$hex\", { threshold: 16 });   // ($x, $y)")
                 }
+
+                Mode.SCREENSHOT -> Unit
             }
+        }
+
+        private fun captureSelection() {
+            val left = toScreenX(min(selectionStartX, selectionEndX).toInt().toFloat())
+            val top = toScreenY(min(selectionStartY, selectionEndY).toInt().toFloat())
+            val width = selectionWidth().coerceAtLeast(1)
+            val height = selectionHeight().coerceAtLeast(1)
+            isCapturing = true
+            visibility = View.INVISIBLE
+            invalidate()
+            Thread {
+                val frame = ScreenCapture.capture()
+                post {
+                    isCapturing = false
+                    if (frame == null) {
+                        visibility = View.VISIBLE
+                        Toast.makeText(context, "截图失败：无法获取屏幕画面", Toast.LENGTH_LONG).show()
+                        return@post
+                    }
+                    val cropX = left.coerceIn(0, frame.width - 1)
+                    val cropY = top.coerceIn(0, frame.height - 1)
+                    val cropW = min(width, frame.width - cropX)
+                    val cropH = min(height, frame.height - cropY)
+                    if (cropW < 2 || cropH < 2) {
+                        visibility = View.VISIBLE
+                        Toast.makeText(context, "选区超出屏幕范围", Toast.LENGTH_SHORT).show()
+                        return@post
+                    }
+                    val bitmap = try {
+                        Bitmap.createBitmap(frame, cropX, cropY, cropW, cropH)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (bitmap == null) {
+                        visibility = View.VISIBLE
+                        Toast.makeText(context, "截图失败：选区裁剪异常", Toast.LENGTH_LONG).show()
+                        return@post
+                    }
+                    PickerOverlay.showSavePrompt(context, bitmap)
+                }
+            }.start()
         }
     }
 }
