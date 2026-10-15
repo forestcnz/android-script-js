@@ -182,3 +182,43 @@ adb shell ls -l /sdcard/Android/data/com.script.js/files/tasks/<任务>/images/
 ```
 
 > 测试期间创建的合成任务（`zz_stop_test`、`ui_test`）已在结束时删除，应用内只保留 3 个内置任务。
+
+## 6. 2026-10-15 MuMu 全功能回归（Android 12 · 900×1600）
+
+### 环境与设备
+
+| 项 | 值 |
+|---|---|
+| 设备 | MuMu 模拟器 `127.0.0.1:16416`（Android 12，900×1600） |
+| 构建 | `:app:assembleDebug`（`app-debug.apk`，39.3 MB） |
+| Root | 可用（`su -c id` → uid=0） |
+| 无障碍 | 已开启（`zz_ui_task` 通过） |
+| 悬浮窗 | 已授权（应用内 + 应用外均验证通过） |
+
+### 通过项
+
+| 功能 | 状态 | 证据 |
+|---|---|---|
+| API 冒烟（`zz_api_test`） | ✅ `SUMMARY failures=0` | 手势 / OCR / 颜色 / adapter / 找色 / 手势 / 悬浮窗等全部通过 |
+| 任务创建 / 编辑 / 运行 | ✅ 内置 + 合成任务均正常 | 任务列表 7 个任务全部可运行 |
+| ZIP 导入 | ✅ `zz_imported_task` 出现，目录和文件已创建 | 导入后任务列表 +1 |
+| ZIP 导出 | ✅ 文件生成且结构正确 | `Tasks` 目录下 `.zip` 存在 |
+| 导出独立 APK | ✅ 安装成功，v2/v3 签名通过，内嵌任务自动提取并运行 | **本轮修复**：Android 12 上 `BC` 裁剪版 provider 不支持 PKCS12 私钥 → 引入完整 BouncyCastle 并替换 provider |
+| 截取模板 | ✅ Root 静默截屏 → 拖拽框选 → 保存 `tpl_104733.png` | `images/` 目录新增 1165 字节 PNG |
+| 素材管理 | ✅ 预览 / 重命名 / 删除 / 相册导入 | 列表含 `clip.png`、`image:2049.png` |
+| 运行历史 | ✅ 记录生成并可查看 | `zz_api_test` 运行历史 1 条 |
+| 悬浮球（应用外） | ✅ 按住拖拽、展开菜单、控制台 | 切到桌面后仍可拖拽和点击 |
+| 控制台（应用外） | ✅ 输出 / 输入 / 关闭 | 桌面上打开并输出日志 |
+| 定时任务 | ✅ 设置 → 到点触发 | 来源日志标注「（定时任务）」 |
+| Root 截屏 | ✅ `root 静默截屏成功: 1600x900` | logcat 确认 |
+| OCR | ✅ ML Kit 中文识别 | `zz_api_test` OCR 断言通过 |
+
+### 本轮修复的 Bug
+
+| Bug | 根因 | 修复 |
+|---|---|---|
+| 导出独立 APK 在 Android 12 签名失败 | Android 裁剪版 `BC` provider 不支持内置 PKCS12 私钥 | `ApkPackager.kt` 引入完整 BouncyCastle（`bcprov-jdk18on:1.78.1`），签名前移除同名裁剪版 provider 并注册完整版 |
+
+### 结论
+
+全部设计功能在 MuMu（Android 12，900×1600）上通过实测验证，无已知未修复 Bug。

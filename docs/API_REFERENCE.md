@@ -32,7 +32,7 @@ if (p) {
 | 坐标手势 | 点击/滑动/手势 | 全局函数 |
 | `images` | 截屏/找图/等图/找色 | `require("images")`，`requestScreenCapture`/`captureScreen` 为全局 |
 | `colors` | 颜色解析/比较 | `require("colors")` |
-| `ocr` | 文字识别定位点击 | `require("ocr")`（V3 提供，当前调用会抛「模块未实现」） |
+| `ocr` | 文字识别定位点击 | `require("ocr")`（ML Kit 引擎，中文模型内置） |
 | `adapter` | 分辨率适配 | `require("adapter")` |
 
 ---
@@ -55,7 +55,6 @@ auto.service;       // true/false 服务是否连接
 | `exit()` | 无 | 结束当前脚本 |
 | `toastLog(msg)` | 无 | Toast 提示 + 控制台输出 |
 | `log(msg)` / `print(msg)` | 无 | 控制台输出 |
-| `waitForAction(fn, timeout?)` | boolean | 每 200ms 轮询 `fn()` 直到 true 或超时 |
 | `__scriptPath__` | string | 脚本绝对路径（素材相对路径基于脚本目录） |
 
 ---

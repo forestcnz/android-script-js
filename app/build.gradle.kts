@@ -63,6 +63,7 @@ dependencies {
 
     // 任务打包导出独立 APK：APK 重签名（纯 Java 库）
     implementation("com.android.tools.build:apksig:8.7.3")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     // 静默截屏增强：Shizuku（可选，未安装时自动降级到 MediaProjection）
     implementation("dev.rikka.shizuku:api:13.1.5")

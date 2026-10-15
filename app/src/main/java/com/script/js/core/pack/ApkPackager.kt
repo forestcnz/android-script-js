@@ -6,9 +6,11 @@ import com.android.apksig.ApkSigner
 import com.script.js.core.task.TaskManager
 import java.io.File
 import java.io.FileOutputStream
+import java.security.Security
 import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.cert.X509Certificate
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -165,8 +167,13 @@ object ApkPackager {
         val ksFile = File(context.cacheDir, "pack.keystore").apply {
             context.assets.open(KEYSTORE_ASSET).use { input -> outputStream().use { input.copyTo(it) } }
         }
-        // Android 仅支持 PKCS12/BKS 等类型，JKS 不可用；此处使用由调试密钥转换的 PKCS12
-        val keyStore = KeyStore.getInstance("PKCS12").apply {
+        val currentBc = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME)
+        if (currentBc == null || currentBc.javaClass.name.startsWith("com.android.org.bouncycastle")) {
+            Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
+            Security.addProvider(BouncyCastleProvider())
+        }
+        // Android 裁剪版 JCE 无法还原内置 PKCS12 私钥；完整 BouncyCastle 提供该 KeyStore 和密钥翻译
+        val keyStore = KeyStore.getInstance("PKCS12", BouncyCastleProvider.PROVIDER_NAME).apply {
             ksFile.inputStream().use { load(it, KEYSTORE_PASS.toCharArray()) }
         }
         val key = keyStore.getKey(KEY_ALIAS, KEYSTORE_PASS.toCharArray()) as PrivateKey
