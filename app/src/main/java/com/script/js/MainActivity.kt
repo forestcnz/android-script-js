@@ -1025,6 +1025,7 @@ class MainActivity : ComponentActivity() {
         val tools = listOf<Triple<String, String, () -> Unit>>(
             Triple("取坐标", "点屏幕取点，生成 click(x, y)", { showPicker(PickerOverlay.Mode.POINT) }),
             Triple("取颜色", "生成 findColor 颜色串（依赖截屏）", { showPicker(PickerOverlay.Mode.COLOR) }),
+            Triple("去截图", "拖拽框选屏幕区域并重命名保存（依赖截屏）", { showPicker(PickerOverlay.Mode.SCREENSHOT) }),
             Triple("悬浮日志", "浮在屏幕上的实时日志面板", { toggleConsole() }),
             Triple(
                 if (launcherEnabled) "隐藏悬浮球" else "显示悬浮球",

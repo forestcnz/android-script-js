@@ -636,6 +636,10 @@ object FloatyManager {
             hideTaskPanel()
             PickerOverlay.show(context, PickerOverlay.Mode.COLOR)
         })
+        tools.addView(toolChip(context, "去截图") {
+            hideTaskPanel()
+            PickerOverlay.show(context, PickerOverlay.Mode.SCREENSHOT)
+        })
         tools.addView(toolChip(context, "日志") {
             hideTaskPanel()
             ConsoleOverlay.toggle(context)

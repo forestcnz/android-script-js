@@ -96,6 +96,8 @@ object ScriptRunner {
         GestureClient.onFallback = { msg -> addLog('W', msg) }
         // 坐标拾取/取色结果 → 写运行日志（代码已复制到剪贴板）
         PickerOverlay.onPicked = { code -> addLog('I', "拾取结果（已复制）: $code") }
+        // 框选截图保存结果 → 写运行日志（包含完整路径）
+        PickerOverlay.onScreenshotSaved = { file -> addLog('I', "截图已保存: ${file.absolutePath}") }
         // 悬浮控制台日志源（级别着色 + 自动滚底由控制台自身处理）
         ConsoleOverlay.logProvider = {
             _logs.value.map { ConsoleOverlay.ConsoleLine(it.time, it.level, it.msg) }
