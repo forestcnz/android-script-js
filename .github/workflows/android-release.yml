@@ -1,0 +1,77 @@
+name: Android build and release
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.6.1'
+
+      - name: Build debug APK
+        run: >-
+          gradle assembleDebug
+          -PappVersionCode=${{ github.run_number }}
+          -PappVersionName=0.1.${{ github.run_number }}
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          mkdir -p dist
+          short_sha="${GITHUB_SHA::7}"
+          cp app/build/outputs/apk/debug/app-debug.apk "dist/android-script-js-${short_sha}-debug.apk"
+          cd dist
+          sha256sum *.apk > SHA256SUMS.txt
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-script-js-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          tag="build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-${short_sha}"
+          title="Android build ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT} (${short_sha})"
+          notes=$(cat <<EOF
+          Automated Android debug build from the master branch.
+
+          - Commit: ${GITHUB_SHA}
+          - Version code: ${GITHUB_RUN_NUMBER}
+          - APK is debug-signed. Installs from different CI runs may require uninstalling the previous build first because each runner uses its own debug signing key.
+          EOF
+          )
+          gh release create "$tag" dist/* \
+            --title "$title" \
+            --notes "$notes" \
+            --target "$GITHUB_SHA"
