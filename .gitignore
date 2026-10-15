@@ -21,3 +21,6 @@ Thumbs.db
 hs_err_pid*.log
 *.log
 .kotlin/
+
+# 临时调试截图
+sdxn-*.png
