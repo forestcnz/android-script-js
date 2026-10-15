@@ -392,9 +392,10 @@ object FloatyManager {
             android.widget.FrameLayout.LayoutParams(size, size)
         )
         frame.addView(
-            textView(context, "JS", 14f, COLOR_TEXT).apply {
-                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                gravity = Gravity.CENTER
+            android.widget.ImageView(context).apply {
+                setImageResource(com.script.js.R.drawable.ic_floaty_logo)
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                setPadding((9 * d).toInt(), (9 * d).toInt(), (9 * d).toInt(), (9 * d).toInt())
             },
             android.widget.FrameLayout.LayoutParams(size, size)
         )

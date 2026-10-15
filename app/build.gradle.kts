@@ -10,11 +10,11 @@ android {
     compileSdk = 36          // quickjs-kt 1.0.5 要求依赖方 compileSdk >= 36
 
     defaultConfig {
-        applicationId = "com.script.js"
+        applicationId = "com.sdxn.assistant"
         minSdk = 24          // dispatchGesture 需要 API 24+
         targetSdk = 35
         versionCode = providers.gradleProperty("appVersionCode").orElse("1").get().toInt()
-        versionName = providers.gradleProperty("appVersionName").orElse("0.1.0").get()
+        versionName = providers.gradleProperty("appVersionName").orElse("1.0.0-sdxn").get()
     }
 
     buildTypes {

@@ -1,0 +1,7 @@
+{
+  "name": "神雕侠侣启动检查",
+  "desc": "拉起神雕侠侣手游并确认助手手势/悬浮能力可用",
+  "target": "com.wanmei.mini.condor.tiger",
+  "designSize": [1080, 1920],
+  "loop": { "count": 1, "interval": 0 }
+}
