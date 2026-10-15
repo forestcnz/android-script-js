@@ -55,7 +55,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -73,7 +73,7 @@ jobs:
           EOF
           )
           gh release create "$tag" dist/* \
-            --prerelease \
+            --latest \
             --title "$title" \
             --notes "$notes" \
             --target "$GITHUB_SHA"
