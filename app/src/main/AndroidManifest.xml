@@ -75,6 +75,16 @@
                 android:value="script_execution" />
         </service>
 
+        <!-- 悬浮球启用期间保活；MuMu 等模拟器切换到后台时可能回收普通进程。 -->
+        <service
+            android:name=".core.floaty.FloatyForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="overlay_window" />
+        </service>
+
         <!-- Shizuku UserService 不是 Android Service：Shizuku（shell 身份）会直接反射实例化
              core.image.ShellUserService（必须继承 IBinder / AIDL Stub），因此无需在此声明。 -->
 

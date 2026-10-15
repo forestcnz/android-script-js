@@ -70,6 +70,7 @@ object FloatyManager {
     }
 
     private var windowManager: WindowManager? = null
+    private var appContext: Context? = null
 
     /** 计时刷新用（主线程） */
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -103,15 +104,32 @@ object FloatyManager {
 
     /** 跳转系统悬浮窗授权设置页 */
     fun requestOverlayPermission(activity: Activity) {
-        val intent = Intent(
-            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-            Uri.parse("package:${activity.packageName}")
+        val intents = listOf(
+            Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:${activity.packageName}")
+            ),
+            // 部分模拟器设置应用不支持 package 定向，退回到悬浮窗应用列表。
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
+            // 再退回应用详情页，让用户从权限入口手动开启。
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${activity.packageName}")
+            )
         )
-        activity.startActivity(intent)
+        for (intent in intents) {
+            try {
+                activity.startActivity(intent)
+                return
+            } catch (_: Exception) {
+                // 尝试下一个系统设置入口。
+            }
+        }
+        Log.w(TAG, "无法打开悬浮窗授权设置页")
     }
 
     /** 悬浮控件是否显示中 */
-    fun isLauncherShowing(): Boolean = capsuleView != null
+    fun isLauncherShowing(): Boolean = capsuleView?.isAttachedToWindow == true
 
     /**
      * 屏幕尺寸/方向变化（旋转、分屏、分辨率切换）后调用：
@@ -148,9 +166,21 @@ object FloatyManager {
      * 未授权返回 false；已显示直接返回 true。
      */
     @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
-    fun showLauncher(context: Context): Boolean {
-        if (!hasOverlayPermission(context)) return false
-        if (capsuleView != null) return true
+    fun showLauncher(context: Context, keepAlive: Boolean = true): Boolean {
+        appContext = context.applicationContext
+        if (!hasOverlayPermission(context)) {
+            if (keepAlive) FloatyForegroundService.stop(context)
+            return false
+        }
+        if (capsuleView?.isAttachedToWindow == true) {
+            if (keepAlive) FloatyForegroundService.start(context)
+            return true
+        }
+        // 模拟器/系统可能移除了窗口但没有销毁应用进程；清掉陈旧引用后重新 addView。
+        if (capsuleView != null) {
+            hideLauncher(stopKeepAlive = false)
+            Log.w(TAG, "检测到悬浮球窗口已脱离 WindowManager，正在重建")
+        }
         val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val density = context.resources.displayMetrics.density
 
@@ -222,15 +252,16 @@ object FloatyManager {
             windowManager = wm
             renderCapsule(context)
             Log.i(TAG, "悬浮控件已显示")
+            if (keepAlive) FloatyForegroundService.start(context)
             true
         } catch (e: Exception) {
-            Log.w(TAG, "悬浮控件显示失败: ${e.message}")
+            Log.w(TAG, "悬浮控件显示失败 (overlayPermission=${hasOverlayPermission(context)}): ${e.javaClass.simpleName}: ${e.message}")
             false
         }
     }
 
     /** 隐藏悬浮控件（含面板） */
-    fun hideLauncher() {
+    fun hideLauncher(context: Context? = null, stopKeepAlive: Boolean = true) {
         hideTaskPanel()
         capsuleView?.let {
             try {
@@ -241,6 +272,9 @@ object FloatyManager {
         capsuleView = null
         capsuleParams = null
         windowManager = null
+        if (stopKeepAlive) {
+            (context?.applicationContext ?: appContext)?.let { FloatyForegroundService.stop(it) }
+        }
         Log.i(TAG, "悬浮控件已隐藏")
     }
 

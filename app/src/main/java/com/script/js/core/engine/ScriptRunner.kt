@@ -153,16 +153,23 @@ object ScriptRunner {
     fun ensureLauncher(context: Context): Boolean {
         val app = context.applicationContext
         appContext = app
-        if (!FloatyManager.hasOverlayPermission(app)) return false
-        if (!FloatyManager.isEnabledByUser(app)) return false
-        if (FloatyManager.isLauncherShowing()) {
-            _launcherEnabled.value = true
-            return true
+        if (!FloatyManager.hasOverlayPermission(app)) {
+            _launcherEnabled.value = false
+            FloatyManager.hideLauncher(app)
+            return false
         }
+        if (!FloatyManager.isEnabledByUser(app)) {
+            _launcherEnabled.value = false
+            FloatyManager.hideLauncher(app)
+            return false
+        }
+        val wasShowing = FloatyManager.isLauncherShowing()
         val ok = FloatyManager.showLauncher(app)
         if (ok) {
             _launcherEnabled.value = true
-            addLog('I', "悬浮球已自动显示（默认开启，可拖动贴边）")
+            if (!wasShowing) addLog('I', "悬浮球已自动显示（默认开启，可拖动贴边）")
+        } else {
+            _launcherEnabled.value = false
         }
         return ok
     }

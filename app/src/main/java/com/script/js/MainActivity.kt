@@ -271,6 +271,8 @@ class MainActivity : ComponentActivity() {
             ScriptRunner.ensureLauncher(this)
             return
         }
+        // 权限被撤销时同步收起已失效的浮层，并停止悬浮球保活服务。
+        ScriptRunner.ensureLauncher(this)
         if (FloatyManager.wasOverlayAsked(this)) return
         FloatyManager.markOverlayAsked(this)
         ScriptRunner.appendLog("悬浮窗默认开启：已自动打开授权页，开启「显示在其他应用上层」后悬浮球会自动出现", 'I')
