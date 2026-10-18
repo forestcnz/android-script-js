@@ -88,6 +88,16 @@ object ScriptRunner {
         FloatyManager.onStopClicked = { stop() }
         // 悬浮球面板选任务 → 直接运行
         FloatyManager.onTaskSelected = { name -> appContext?.let { run(it, name) } }
+        // 悬浮球面板[关闭悬浮窗]：运行中先停止任务，再隐藏并记下用户意愿（下次启动不再自动显示）
+        FloatyManager.onLauncherClose = {
+            appContext?.let { ctx ->
+                if (_state.value.running) stop()
+                _launcherEnabled.value = false
+                FloatyManager.setEnabledByUser(ctx, false)
+                FloatyManager.hideLauncher()
+                addLog('I', "悬浮球已关闭（下次启动不再自动显示，可在「工具」页重新开启）")
+            }
+        }
         // 任务列表来源（悬浮球每次展开时实时读取）
         FloatyManager.taskProvider = {
             appContext?.let { TaskManager.listTasks(it).map { t -> t.name } } ?: emptyList()
@@ -386,6 +396,14 @@ object ScriptRunner {
         addLog('I', "停止任务: $name")
         ScriptEngine.cancel()   // 打断绑定函数内的阻塞循环（sleep/等待）
         job?.cancel()           // 取消引擎协程（挂起点）
+    }
+
+    /**
+     * 通知栏「隐藏悬浮球」等外部入口关闭悬浮球后调用（floaty 模块不依赖 engine，
+     * 由 Service 反向通知同步开关状态，避免「工具」页开关显示与实际不符）。
+     */
+    fun onLauncherHiddenByUser() {
+        _launcherEnabled.value = false
     }
 
     /** 引擎回调环境：日志进运行面板 + logcat；Toast/设置跳转切主线程 */

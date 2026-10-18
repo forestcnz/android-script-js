@@ -25,7 +25,11 @@ import android.widget.TextView
  * - 空闲态：胶囊「JS」，点击展开面板，拖动可移动并自动贴边（位置会记住）；
  * - 运行态：同一胶囊变成「▶ 任务名  ■ 停止」，点击停止中断脚本。
  *
- * 展开的面板按「任务 / 工具」分区：任务列表可滚动，工具区提供坐标拾取、取色器、悬浮日志。
+ * 贴边后空闲球半隐藏：约一半探出屏外，点击先弹出完整显示，再次点击才展开面板；
+ * 运行态胶囊完整贴边（停止键保持可见）。半隐藏位置会持久化，重启后保持贴边形态。
+ *
+ * 展开的面板按「任务 / 工具」分区：任务列表可滚动，工具区提供坐标拾取、取色器、悬浮日志，
+ * 底部提供「关闭悬浮窗」入口（关闭后可在 App「工具」页重新开启）。
  * 对应设计 docs/DESIGN.md 第 4.4 节「悬浮与调试工具」。
  */
 object FloatyManager {
@@ -40,6 +44,15 @@ object FloatyManager {
 
     /** 是否已自动引导过悬浮窗授权（只自动跳一次，避免每次启动都抢屏） */
     private const val KEY_ASKED_OVERLAY = "asked_overlay"
+
+    /** 松手贴边后留在屏内的边距（未半隐藏时） */
+    private const val SNAP_MARGIN_DP = 6
+
+    /** 空闲球尺寸（dp），与 ballView 保持一致 */
+    private const val BALL_SIZE_DP = 52
+
+    /** 贴边半隐藏：探出屏外的部分占球宽的比例（剩余半圆留在屏内，可点击弹出） */
+    private const val PEEK_HIDDEN_RATIO = 0.5f
 
     // 配色（悬浮窗自成体系，不跟随 App 主题，保证在任何应用之上都可读）
     private const val COLOR_BG = 0xF21F1F27.toInt()
@@ -82,6 +95,12 @@ object FloatyManager {
     /** 展开的任务/工具面板 */
     private var panelView: View? = null
 
+    /** 贴边方向：目前只做左右贴边 */
+    private enum class DockSide { NONE, LEFT, RIGHT }
+
+    /** 当前贴边形态（LEFT/RIGHT = 半隐藏在屏幕边缘，NONE = 完整显示） */
+    private var dockedSide = DockSide.NONE
+
     /** 当前运行中的任务名（null = 空闲态） */
     @Volatile
     private var runningTask: String? = null
@@ -97,6 +116,10 @@ object FloatyManager {
     /** 任务列表提供者（由宿主注入，避免 core 层循环依赖） */
     @Volatile
     var taskProvider: (() -> List<String>)? = null
+
+    /** 面板点击「关闭悬浮窗」的回调（宿主绑定，用于同步运行状态与开关 UI） */
+    @Volatile
+    var onLauncherClose: (() -> Unit)? = null
 
     /** 是否已授予悬浮窗权限 */
     fun hasOverlayPermission(context: Context): Boolean =
@@ -142,7 +165,12 @@ object FloatyManager {
         val m = context.resources.displayMetrics
         val w = view.width.takeIf { it > 0 } ?: (52 * m.density).toInt()
         val h = view.height.takeIf { it > 0 } ?: (52 * m.density).toInt()
-        params.x = params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        params.x = if (dockedSide == DockSide.NONE) {
+            params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        } else {
+            // 半隐藏贴边态：按新屏幕宽度重新对齐探出屏外的部分
+            peekedX(stagedViewW(context, view), m.widthPixels, dockedSide)
+        }
         params.y = params.y.coerceIn(0, (m.heightPixels - h).coerceAtLeast(0))
         hideTaskPanel()
         try {
@@ -198,6 +226,12 @@ object FloatyManager {
             loadPosition(context, KEY_X, defaultX),
             loadPosition(context, KEY_Y, defaultY)
         )
+        // 历史位置若为半隐藏贴边（越过屏幕边界），按原贴边形态恢复
+        val ballW = (BALL_SIZE_DP * density).toInt()
+        dockedSide = dockSideOf(posX, metrics.widthPixels, ballW)
+        if (dockedSide != DockSide.NONE) {
+            Log.i(TAG, "恢复半隐藏贴边悬浮球: $dockedSide")
+        }
         val params = overlayParams(
             Gravity.TOP or Gravity.START,
             x = posX,
@@ -233,11 +267,11 @@ object FloatyManager {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (moved) {
-                        snapToEdge(context, wm, capsule, params)
-                        savePosition(context, params.x, params.y)
-                    } else {
-                        toggleTaskPanel(context, wm, params)
+                    when {
+                        moved -> snapToEdge(context, wm, capsule, params)
+                        // 半隐藏贴边第一次点击：先完整弹出，下一次点击才展开面板
+                        popOutIfDocked(context, wm, capsule, params) -> Unit
+                        else -> toggleTaskPanel(context, wm, params)
                     }
                     false
                 }
@@ -272,6 +306,7 @@ object FloatyManager {
         capsuleView = null
         capsuleParams = null
         windowManager = null
+        dockedSide = DockSide.NONE   // 下次显示时按持久化位置重新推断贴边形态
         if (stopKeepAlive) {
             (context?.applicationContext ?: appContext)?.let { FloatyForegroundService.stop(it) }
         }
@@ -290,6 +325,8 @@ object FloatyManager {
                 return
             }
         }
+        // 半隐藏贴边球就地变成运行胶囊：不再探出屏外（避免挡住停止键）
+        dockedSide = DockSide.NONE
         renderCapsule(context)
         startTicker(context)
         Log.i(TAG, "悬浮控件进入运行态: $taskName")
@@ -306,7 +343,6 @@ object FloatyManager {
                 capsuleParams?.let { p ->
                     v.post {
                         snapToEdge(context, wm, v, p)
-                        savePosition(context, p.x, p.y)
                     }
                 }
             }
@@ -368,7 +404,13 @@ object FloatyManager {
         val w = view.width.takeIf { it > 0 } ?: return
         val h = view.height.takeIf { it > 0 } ?: return
         val m = context.resources.displayMetrics
-        val nx = params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        val nx = when (dockedSide) {
+            DockSide.LEFT, DockSide.RIGHT ->
+                // 半隐藏贴边态：按当前宽度重新对齐屏外隐藏量（球↔胶囊宽度变化后仍保持贴边形态）
+                peekedX(stagedViewW(context, view), m.widthPixels, dockedSide)
+            DockSide.NONE ->
+                params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        }
         val ny = params.y.coerceIn(0, (m.heightPixels - h).coerceAtLeast(0))
         if (nx != params.x || ny != params.y) {
             params.x = nx
@@ -378,6 +420,13 @@ object FloatyManager {
             } catch (_: Exception) {
             }
         }
+    }
+
+    /** 参与贴边计算的悬浮控件宽度：空闲用固定球宽（状态切换瞬间测量值可能是旧胶囊宽度） */
+    private fun stagedViewW(context: Context, view: View): Int {
+        val density = context.resources.displayMetrics.density
+        if (runningTask == null) return (BALL_SIZE_DP * density).toInt()
+        return view.width.takeIf { it > 0 } ?: (60 * density).toInt()
     }
 
     /** 空闲态：圆形球 + 状态点 */
@@ -489,34 +538,87 @@ object FloatyManager {
         if (name.length <= max) name else name.take(max) + "…"
 
 
-    /** 松手后贴到最近的左/右边缘 */
+    /**
+     * 松手后贴到最近的左/右边缘：
+     * - 空闲球：半隐藏，约一半探出屏外（peek），点击可完整弹出；
+     * - 运行态胶囊：完整贴边并留边距（停止键必须保持可见）。
+     */
     private fun snapToEdge(
         context: Context,
         wm: WindowManager,
         view: View,
         params: WindowManager.LayoutParams
     ) {
-        val screenW = context.resources.displayMetrics.widthPixels
-        val viewW = view.width.takeIf { it > 0 } ?: (60 * context.resources.displayMetrics.density).toInt()
-        val margin = (6 * context.resources.displayMetrics.density).toInt()
-        params.x = if (params.x + viewW / 2 < screenW / 2) margin else screenW - viewW - margin
+        val m = context.resources.displayMetrics
+        val screenW = m.widthPixels
+        val viewW = stagedViewW(context, view)
+        val side = if (params.x + viewW / 2 < screenW / 2) DockSide.LEFT else DockSide.RIGHT
+        params.x = if (runningTask == null) {
+            peekedX(viewW, screenW, side)
+        } else {
+            val margin = (SNAP_MARGIN_DP * m.density).toInt()
+            if (side == DockSide.LEFT) margin else screenW - viewW - margin
+        }
+        dockedSide = if (runningTask == null) side else DockSide.NONE
         try {
             wm.updateViewLayout(view, params)
         } catch (_: Exception) {
         }
+        savePosition(context, params.x, params.y)
+        Log.i(TAG, "悬浮控件贴边: $side${if (runningTask == null) "（半隐藏）" else "（完整）"}")
+    }
+
+    /** 半隐藏贴边的 x：屏内只留一条半圆弧，方向为 [side] */
+    private fun peekedX(viewW: Int, screenW: Int, side: DockSide): Int {
+        val hidden = (viewW * PEEK_HIDDEN_RATIO).toInt().coerceAtLeast(1)
+        return when (side) {
+            DockSide.LEFT -> -hidden
+            DockSide.RIGHT -> screenW - viewW + hidden
+            DockSide.NONE -> 0
+        }
+    }
+
+    /**
+     * 半隐藏态第一次点击：把球从屏幕边缘完整弹出（不展开面板，下一次点击才展开）。
+     * @return 是否执行了弹出（false = 本就完整可见）
+     */
+    private fun popOutIfDocked(
+        context: Context,
+        wm: WindowManager,
+        view: View,
+        params: WindowManager.LayoutParams
+    ): Boolean {
+        val side = dockedSide
+        if (side == DockSide.NONE) return false
+        dockedSide = DockSide.NONE
+        val m = context.resources.displayMetrics
+        val margin = (SNAP_MARGIN_DP * m.density).toInt()
+        val viewW = view.width.takeIf { it > 0 } ?: (BALL_SIZE_DP * m.density).toInt()
+        params.x = if (side == DockSide.LEFT) margin else m.widthPixels - viewW - margin
+        try {
+            wm.updateViewLayout(view, params)
+        } catch (_: Exception) {
+        }
+        savePosition(context, params.x, params.y)
+        Log.i(TAG, "半隐藏悬浮球已弹出完整显示")
+        return true
+    }
+
+    /** 根据持久化坐标推断贴边状态（负 x = 左贴边，越过右边界 = 右贴边） */
+    private fun dockSideOf(x: Int, screenW: Int, viewW: Int): DockSide = when {
+        x < 0 -> DockSide.LEFT
+        x > screenW - viewW -> DockSide.RIGHT
+        else -> DockSide.NONE
     }
 
     private fun loadPosition(context: Context, key: String, default: Int): Int =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(key, default)
 
     /**
-     * 位置越界钳位：旋转屏幕/切换分辨率后，历史绝对坐标可能落到屏幕外，
-     * 此时回落到默认位置，避免悬浮球「消失」。
-     */
-    /**
      * 位置钳位：旋转屏幕/切换分辨率后历史绝对坐标可能落到屏幕外。
-     * 处理原则是**收紧到屏幕内**（而不是丢弃位置回默认）——用户把球拖到右边缘属于正常位置，
-     * 早期实现按 120dp 余量判定「越界」并复位，导致贴边位置重启后丢失。
+     * - 屏内位置：y 越界时收紧到屏内（早期按 120dp 余量判定「越界」并复位是 bug，已修）；
+     * - 越过左右边界的 x 属于用户留下的半隐藏贴边位置（负 x=左贴边，越过右界=右贴边），
+     *   归一到标准探出量而不是收回屏内，重启后仍保持贴边半隐藏形态。
      */
     private fun clampToScreen(
         context: Context,
@@ -524,15 +626,22 @@ object FloatyManager {
         y: Int
     ): Pair<Int, Int> {
         val m = context.resources.displayMetrics
-        val viewW = capsuleView?.width?.takeIf { it > 0 } ?: (56 * m.density).toInt()
-        val viewH = capsuleView?.height?.takeIf { it > 0 } ?: (56 * m.density).toInt()
+        val viewW = (BALL_SIZE_DP * m.density).toInt()
         val maxX = (m.widthPixels - viewW).coerceAtLeast(0)
-        val maxY = (m.heightPixels - viewH).coerceAtLeast(0)
-        if (x < 0 || y < 0 || x > maxX || y > maxY) {
-            val nx = x.coerceIn(0, maxX)
-            val ny = y.coerceIn(0, maxY)
-            Log.i(TAG, "悬浮控件位置越界(x=$x,y=$y)，收紧为($nx,$ny)")
-            return nx to ny
+        val maxY = (m.heightPixels - viewW).coerceAtLeast(0)
+        if (x < 0) {
+            val nx = peekedX(viewW, m.widthPixels, DockSide.LEFT)
+            Log.i(TAG, "悬浮控件位置(x=$x,y=$y)：恢复左贴边半隐藏($nx,$y)")
+            return nx to y.coerceIn(0, maxY)
+        }
+        if (x > maxX) {
+            val nx = peekedX(viewW, m.widthPixels, DockSide.RIGHT)
+            Log.i(TAG, "悬浮控件位置(x=$x,y=$y)：恢复右贴边半隐藏($nx,$y)")
+            return nx to y.coerceIn(0, maxY)
+        }
+        if (y < 0 || y > maxY) {
+            Log.i(TAG, "悬浮控件位置越界(x=$x,y=$y)，y 收紧为(${y.coerceIn(0, maxY)})")
+            return x to y.coerceIn(0, maxY)
         }
         return x to y
     }
@@ -547,7 +656,7 @@ object FloatyManager {
     /**
      * 展开/收起面板（每次展开重新读取任务列表与运行状态）。
      * 布局：卡片式，自上而下 = 头部（选择任务 + 关闭） / 任务列表（可滚动） / 工具按钮行 /
-     * 运行中任务显示「■ 停止当前任务」。宽度固定 268dp，贴悬浮球同侧并做屏幕内钳位。
+     * 运行中任务显示「■ 停止当前任务」 / 底部「✕ 关闭悬浮窗」。宽度固定 268dp，贴悬浮球同侧并做屏幕内钳位。
      */
     private fun toggleTaskPanel(
         context: Context,
@@ -676,11 +785,22 @@ object FloatyManager {
             panel.addView(stopRow)
         }
 
+        // —— 底部：关闭悬浮窗（关闭后需回 App「工具」页重新开启） ——
+        panel.addView(divider(context))
+        panel.addView(
+            closeLauncherRow(context),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
         // —— 定位：贴悬浮球同侧，做屏幕内钳位（不超出右/下边界） ——
         val screenW = context.resources.displayMetrics.widthPixels
         val screenH = context.resources.displayMetrics.heightPixels
         val panelW = (268 * d).toInt()
-        val estH = (220 * d).toInt()
+        // 高度估算含关闭悬浮窗行（头部+列表+工具行+关闭行），钳位仅防底部越界
+        val estH = (260 * d).toInt()
         val leftSide = capsule.x + capsuleW() / 2 < screenW / 2
         val panelX = if (leftSide) capsule.x else capsule.x + capsuleW() - panelW
         val panelY = (capsule.y + capsuleH() + (8 * d).toInt())
@@ -771,6 +891,27 @@ object FloatyManager {
         }
     }
 
+    /** 面板底部「✕ 关闭悬浮窗」整行按钮 */
+    private fun closeLauncherRow(context: Context): View {
+        val d = context.resources.displayMetrics.density
+        return textView(context, "✕ 关闭悬浮窗", 13f, COLOR_TEXT_DIM).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, (10 * d).toInt(), 0, (10 * d).toInt())
+            isClickable = true
+            setOnClickListener {
+                Log.i(TAG, "面板点击关闭悬浮窗，回调已绑定=${onLauncherClose != null}")
+                hideTaskPanel()
+                onLauncherClose?.invoke() ?: run {
+                    // 宿主未绑定回调（如仅保活服务自启）时退化为直接隐藏并记录用户意愿
+                    appContext?.let { ctx ->
+                        setEnabledByUser(ctx, false)
+                        hideLauncher(ctx)
+                    }
+                }
+            }
+        }
+    }
+
     private fun hideTaskPanel() {
         panelView?.let {
             try {
@@ -805,7 +946,9 @@ object FloatyManager {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             windowType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            // NO_LIMITS 允许窗口探出屏幕外：贴边半隐藏的「埋进边缘」部分需要延伸出屏幕边界
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             this.gravity = gravity

@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.script.js.MainActivity
+import com.script.js.core.engine.ScriptRunner
 
 /**
  * 悬浮球启用期间的前台服务。部分模拟器会在应用切到后台时回收普通进程，
@@ -28,6 +29,7 @@ class FloatyForegroundService : Service() {
         if (intent?.action == ACTION_HIDE) {
             FloatyManager.setEnabledByUser(this, false)
             FloatyManager.hideLauncher(stopKeepAlive = false)
+            ScriptRunner.onLauncherHiddenByUser()   // 同步「工具」页悬浮球开关状态
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf(startId)
             return START_NOT_STICKY
