@@ -1,0 +1,6 @@
+{
+  "name": "自动确定",
+  "desc": "循环找图：出现 确定/确定(倒计时) 按钮就自动点击（素材在 images/ 下，可自行补充模板）",
+  "target": "com.wanmei.mini.condor.tiger",
+  "loop": { "count": 1, "interval": 0 }
+}
