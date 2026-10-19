@@ -5,11 +5,13 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -20,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -32,6 +35,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -40,9 +44,11 @@ import com.script.js.core.editor.Edits
 import com.script.js.core.editor.JsHighlighter
 import com.script.js.core.engine.ScriptRunner
 import com.script.js.core.task.TaskManager
+import com.script.js.ui.ScriptTheme
+import com.script.js.ui.AppIcon
 
 /**
- * 内置编辑器：编辑任务入口脚本 task.js，支持语法高亮、API 补全、保存与“保存并运行”。
+ * 内置编辑器：编辑任务入口脚本 task.js，支持语法高亮、API 补全与保存。
  * 打开时可定位到上次运行的出错行（高亮 + 提示条）。
  * 对应设计 docs/DESIGN.md 第 4.3 节。
  */
@@ -85,7 +91,7 @@ class ScriptEditorActivity : ComponentActivity() {
 
         ApiDocs.writeDts(this)   // 生成/刷新 .d.ts（相当于 :api-docs 产物）
         setContent {
-            MaterialTheme {
+            ScriptTheme {
                 EditorScreen()
             }
         }
@@ -95,24 +101,21 @@ class ScriptEditorActivity : ComponentActivity() {
     @Composable
     private fun EditorScreen() {
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
-                    title = { Text("编辑 · $taskName" + if (dirty) " *" else "") },
+                    navigationIcon = {
+                        IconButton(onClick = { finish() }) { AppIcon(R.drawable.ic_back, "返回并自动保存") }
+                    },
+                    title = {
+                        Column {
+                            Text("脚本编辑", style = MaterialTheme.typography.titleMedium)
+                            Text(taskName, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
                     actions = {
                         TextButton(onClick = { save(showToast = true) }) { Text("保存") }
-                        TextButton(onClick = {
-                            if (save(showToast = false)) {
-                                ScriptRunner.attach(applicationContext)
-                                ScriptRunner.run(this@ScriptEditorActivity, taskName)
-                                Toast.makeText(
-                                    this@ScriptEditorActivity,
-                                    "已保存并开始运行",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                finish()   // 回到主界面看运行日志
-                            }
-                        }) { Text("运行") }
-                        TextButton(onClick = { finish() }) { Text("返回") }
                     }
                 )
             }
@@ -152,14 +155,18 @@ class ScriptEditorActivity : ComponentActivity() {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(8.dp)
+                        .padding(horizontal = 12.dp)
+                        .weight(1f)
+                        .background(MaterialTheme.colorScheme.surface, MaterialTheme.shapes.small)
+                        .padding(12.dp)
                 ) {
                     BasicTextField(
                         value = content,
                         onValueChange = { new ->
                             // 自动缩进 / 括号配对（只影响单字符插入，粘贴原样放行）
-                            content = Edits.apply(content, new)
-                            dirty = true
+                            val edited = Edits.apply(content, new)
+                            if (edited.text != content.text) dirty = true
+                            content = edited
                         },
                         textStyle = TextStyle(
                             fontFamily = FontFamily.Monospace,
@@ -173,6 +180,20 @@ class ScriptEditorActivity : ComponentActivity() {
                         },
                         modifier = Modifier.fillMaxSize()
                     )
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    val position = remember(content.text, content.selection.start) {
+                        val before = content.text.take(content.selection.start)
+                        val line = before.count { it == '\n' } + 1
+                        val column = before.length - before.lastIndexOf('\n')
+                        line to column
+                    }
+                    Text("Ln ${position.first}, Col ${position.second}",
+                        style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.weight(1f))
+                    Text(if (dirty) "待保存 · 离开时自动保存" else "已保存",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
@@ -199,7 +220,8 @@ class ScriptEditorActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
                         .clickable { onPick(item.snippet) }
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, MaterialTheme.shapes.extraSmall)
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
                 )
             }
         }

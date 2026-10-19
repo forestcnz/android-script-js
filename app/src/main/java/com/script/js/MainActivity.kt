@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -21,24 +22,30 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -47,6 +54,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
@@ -55,6 +66,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -73,6 +87,9 @@ import com.script.js.core.task.ScheduleManager
 import com.script.js.core.task.RunHistory
 import com.script.js.core.task.TaskManager
 import com.script.js.core.task.TaskZip
+import com.script.js.ui.AppIcon
+import com.script.js.ui.ScriptTheme
+import com.script.js.ui.WorkCard
 import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -82,7 +99,7 @@ import java.io.File
 import rikka.shizuku.Shizuku
 
 /**
- * 主界面：权限状态 + 任务列表（新建/运行/停止）+ 运行日志面板。
+ * 主界面：权限状态 + 任务管理（新建/导入/编辑）+ 运行日志面板。
  * 任务模型见 docs/DESIGN.md 第 4.1 节。
  */
 class MainActivity : ComponentActivity() {
@@ -132,10 +149,10 @@ class MainActivity : ComponentActivity() {
     /** 各任务的定时设置（列表展示用） */
     private var schedules by mutableStateOf(emptyMap<String, ScheduleManager.Schedule>())
 
-    /** 主界面当前 Tab：0=权限状态 1=工具 2=任务 3=日志 */
+    /** 主导航：任务 / 工具 / 日志 / 权限；恢复旋转前的页面。 */
     private var mainTab by mutableStateOf(0)
 
-    private val TAB_TITLES = listOf("权限状态", "工具", "任务", "日志")
+    private val TAB_TITLES = listOf("任务", "工具", "日志", "权限")
 
     /** 任务副标题（config 的 desc / target），仅任务集合变化时刷新 */
     private var taskSubtitles by mutableStateOf(emptyMap<String, String>())
@@ -203,8 +220,10 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        mainTab = savedInstanceState?.getInt("main_tab", 0)?.coerceIn(0, 3) ?: 0
+        showCreateDialog = savedInstanceState?.getBoolean("create_dialog", false) ?: false
         setContent {
-            MaterialTheme {
+            ScriptTheme {
                 MainScreen()
             }
         }
@@ -222,10 +241,14 @@ class MainActivity : ComponentActivity() {
                     overlayGranted = FloatyManager.hasOverlayPermission(this@MainActivity)
                     // 静默通道（Root/Shizuku）可用时无需录屏授权即视为「截屏可用」
                     captureReady = ScreenCapture.isReady() || ScreenCapture.silentAvailableCached()
-                    tasks = TaskManager.listTasks(this@MainActivity)
-                    schedules = ScheduleManager.load(this@MainActivity)
-                        .filter { it.enabled }
-                        .associateBy { it.taskName }
+                    // 文件扫描与定时配置读取不占用主线程，避免列表滚动时卡顿。
+                    val snapshot = withContext(Dispatchers.IO) {
+                        TaskManager.listTasks(this@MainActivity) to
+                            ScheduleManager.load(this@MainActivity)
+                                .filter { it.enabled }.associateBy { it.taskName }
+                    }
+                    tasks = snapshot.first
+                    schedules = snapshot.second
                     delay(1000)
                 }
             }
@@ -260,10 +283,16 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("main_tab", mainTab)
+        outState.putBoolean("create_dialog", showCreateDialog)
+        super.onSaveInstanceState(outState)
+    }
+
     /**
      * 悬浮窗「默认开启」：
      * - 已授权：自动显示悬浮球（用户主动隐藏过则尊重其选择，不再自动弹）；
-     * - 未授权：首次自动跳转系统悬浮窗授权页（只引导一次，避免每次启动抢屏），
+     * - 未授权：由权限页或运行/工具操作按需引导，首页保持可操作。
      *   开启后回到界面即自动出现悬浮球。
      */
     private fun autoEnableFloaty() {
@@ -273,11 +302,6 @@ class MainActivity : ComponentActivity() {
         }
         // 权限被撤销时同步收起已失效的浮层，并停止悬浮球保活服务。
         ScriptRunner.ensureLauncher(this)
-        if (FloatyManager.wasOverlayAsked(this)) return
-        FloatyManager.markOverlayAsked(this)
-        ScriptRunner.appendLog("悬浮窗默认开启：已自动打开授权页，开启「显示在其他应用上层」后悬浮球会自动出现", 'I')
-        Toast.makeText(this, "请开启悬浮窗权限，开启后悬浮球自动出现", Toast.LENGTH_LONG).show()
-        FloatyManager.requestOverlayPermission(this)
     }
 
     /** 检查本应用的手势无障碍服务是否已开启 */
@@ -297,6 +321,7 @@ class MainActivity : ComponentActivity() {
         val runState by ScriptRunner.state.collectAsState()
         val logs by ScriptRunner.logs.collectAsState()
         val launcherEnabled by ScriptRunner.launcherEnabled.collectAsState()
+        val pageStates = rememberSaveableStateHolder()
 
         // 任务副标题（描述/目标应用）：任务集合变化时后台读取一次，避免每秒轮询做文件 IO
         LaunchedEffect(tasks) {
@@ -309,45 +334,62 @@ class MainActivity : ComponentActivity() {
         }
 
         Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
             topBar = {
                 TopAppBar(
-                    title = { Text(getString(R.string.app_name)) },
-                    actions = {
-                        // 运行状态放到标题栏：不再挤占任务列表，且任何位置都能看到/停止
-                        if (runState.running) {
-                            Text(
-                                "运行中：${runState.taskName}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.padding(end = 4.dp)
-                            )
-                            TextButton(onClick = { ScriptRunner.stop() }) { Text("停止") }
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Image(painterResource(R.drawable.ic_brand), null, Modifier.size(28.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(getString(R.string.app_name), style = MaterialTheme.typography.titleMedium)
                         }
                     }
                 )
+            },
+            bottomBar = {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surface, tonalElevation = 0.dp,
+                    modifier = Modifier.height(64.dp)) {
+                    val icons = listOf(R.drawable.ic_nav_tasks, R.drawable.ic_nav_tools,
+                        R.drawable.ic_tool_log, R.drawable.ic_nav_settings)
+                    TAB_TITLES.forEachIndexed { index, title ->
+                        NavigationBarItem(
+                            selected = mainTab == index,
+                            onClick = { mainTab = index },
+                            icon = { AppIcon(icons[index]) },
+                            label = { Text(title) },
+                            colors = NavigationBarItemDefaults.colors(
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary
+                            )
+                        )
+                    }
+                }
             }
         ) { padding ->
-            // 四个分区各占一个 Tab：权限状态 / 工具 / 任务 / 日志。
-            // 竖屏与横屏都只展示一屏内容，避免「设置区挤掉任务列表」；
-            // 宽屏下用 widthIn 限制内容宽度并居中，防止行被拉伸得过长。
+            // 内容在宽屏居中；各页面分别保存滚动位置。
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                TabRow(selectedTabIndex = mainTab) {
-                    TAB_TITLES.forEachIndexed { index, title ->
-                        Tab(
-                            selected = mainTab == index,
-                            onClick = { mainTab = index },
-                            text = { Text(title, style = MaterialTheme.typography.titleSmall) }
-                        )
+                if (runState.running) {
+                    Surface(color = MaterialTheme.colorScheme.primaryContainer) {
+                        Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            AppIcon(R.drawable.ic_play)
+                            Text("正在运行 · ${runState.taskName}", maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.weight(1f).padding(horizontal = 10.dp))
+                            TextButton(onClick = { ScriptRunner.stop() }) { Text("停止") }
+                        }
                     }
                 }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                        .padding(horizontal = 12.dp, vertical = 4.dp),
                     contentAlignment = Alignment.TopCenter
                 ) {
                     Column(
@@ -355,11 +397,13 @@ class MainActivity : ComponentActivity() {
                             .widthIn(max = 840.dp)
                             .fillMaxHeight()
                     ) {
-                        when (mainTab) {
-                            0 -> PermissionsTab(runState)
-                            1 -> ToolsTab(launcherEnabled)
-                            2 -> TaskListSection(runState, Modifier.fillMaxSize())
-                            else -> LogsTab(logs)
+                        pageStates.SaveableStateProvider(mainTab) {
+                            when (mainTab) {
+                                0 -> TaskListSection(runState, Modifier.fillMaxSize())
+                                1 -> ToolsTab(launcherEnabled)
+                                2 -> LogsTab(logs)
+                                else -> PermissionsTab(runState)
+                            }
                         }
                     }
                 }
@@ -370,14 +414,15 @@ class MainActivity : ComponentActivity() {
             CreateTaskDialog(
                 onDismiss = { showCreateDialog = false },
                 onConfirm = { name, scaffold ->
-                    showCreateDialog = false
                     val created = TaskManager.createTask(this, name, scaffold)
                     if (created == null) {
                         Toast.makeText(this, "创建失败：名称非法或已存在", Toast.LENGTH_SHORT).show()
                     } else {
+                        showCreateDialog = false
                         Toast.makeText(this, "已创建「" + created.name + "」（" + scaffold.label + "）", Toast.LENGTH_SHORT).show()
                         ScriptRunner.appendLog("已创建任务: " + created.name + "（脚手架：" + scaffold.label + "）")
                         tasks = TaskManager.listTasks(this)
+                        editTask(created.name)
                     }
                 }
             )
@@ -389,14 +434,7 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { menuTask = null },
                 onEditScript = {
                     menuTask = null
-                    // 带上上次运行的出错行，打开编辑器即定位/高亮
-                    val err = ScriptRunner.lastError.value?.takeIf { it.taskName == name }
-                    startActivity(
-                        Intent(this, ScriptEditorActivity::class.java)
-                            .putExtra(ScriptEditorActivity.EXTRA_TASK, name)
-                            .putExtra(ScriptEditorActivity.EXTRA_ERROR_LINE, err?.line ?: 0)
-                            .putExtra(ScriptEditorActivity.EXTRA_ERROR_MSG, err?.message)
-                    )
+                    editTask(name)
                 },
                 onCaptureTemplate = {
                     menuTask = null
@@ -583,57 +621,44 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 任务行：名称 + 运行/定时状态 + 运行/停止 + 更多操作 */
+    /** 任务行：名称 + 运行/定时状态 + 编辑 + 更多操作；从悬浮窗启动任务。 */
     @Composable
     private fun TaskRow(task: TaskManager.TaskInfo, runState: ScriptRunner.RunState) {
         val running = runState.running && runState.taskName == task.name
         val schedule = schedules[task.name]
-        Card(modifier = Modifier.fillMaxWidth()) {
+        WorkCard(modifier = Modifier.fillMaxWidth()) {
             Row(
-                modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp)
+                    .padding(start = 12.dp, end = 2.dp, top = 4.dp, bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(task.name, style = MaterialTheme.typography.bodyLarge)
-                    // 副标题优先级：运行中 > 定时 > 任务描述/目标应用
-                    val (subtitle, highlight) = when {
-                        running -> "运行中…" to true
-                        schedule != null -> "定时：${schedule.describe()}" to true
-                        else -> (taskSubtitles[task.name] ?: "") to false
-                    }
-                    if (subtitle.isNotBlank()) {
-                        Text(
-                            subtitle,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (highlight) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                Column(Modifier.weight(1f)) {
+                    Text(task.name, style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(when {
+                        running -> "运行中"
+                        schedule != null -> "定时：${schedule.describe()}"
+                        else -> taskSubtitles[task.name]?.ifBlank { "待运行" } ?: "待运行"
+                    },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (running) {
-                    TextButton(onClick = { ScriptRunner.stop() }) { Text("停止") }
-                } else {
-                    Button(onClick = { runTask(task.name) }, enabled = !runState.running) {
-                        Text("运行")
-                    }
-                }
-                // 固定 40dp 触控区：既保证可点面积，也避免图标贴边被卡片裁切
-                Box(
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(50))
-                        .clickable(enabled = !runState.running) { menuTask = task.name },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        "⋮",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (runState.running) MaterialTheme.colorScheme.outline
-                        else MaterialTheme.colorScheme.primary
-                    )
+                TextButton(onClick = { editTask(task.name) }, enabled = !runState.running,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)) { Text("编辑") }
+                IconButton(onClick = { menuTask = task.name }, enabled = !runState.running) {
+                    AppIcon(R.drawable.ic_more, "${task.name}的更多操作")
                 }
             }
         }
+    }
+
+    private fun editTask(name: String) {
+        val err = ScriptRunner.lastError.value?.takeIf { it.taskName == name }
+        startActivity(Intent(this, ScriptEditorActivity::class.java)
+            .putExtra(ScriptEditorActivity.EXTRA_TASK, name)
+            .putExtra(ScriptEditorActivity.EXTRA_ERROR_LINE, err?.line ?: 0)
+            .putExtra(ScriptEditorActivity.EXTRA_ERROR_MSG, err?.message))
     }
 
     /** 任务操作菜单：编辑脚本 / 定时任务 / 模板截取 / 素材管理 */
@@ -654,24 +679,20 @@ class MainActivity : ComponentActivity() {
             onDismissRequest = onDismiss,
             title = { Text(taskName) },
             text = {
-                Column {
-                    TextButton(onClick = onEditScript) { Text("编辑脚本（task.js）") }
-                    TextButton(onClick = onSchedule) {
-                        Text(
-                            if (schedules.containsKey(taskName)) "定时任务（${schedules[taskName]?.describe()}）"
-                            else "定时任务（未设置）"
-                        )
-                    }
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    ToolRow("编辑脚本", "修改任务脚本", R.drawable.ic_code, onEditScript)
+                    ToolRow("定时运行", schedules[taskName]?.describe() ?: "尚未设置运行时间",
+                        R.drawable.ic_clock, onSchedule)
+                    ToolRow("运行历史", "查看执行结果与耗时", R.drawable.ic_tool_log, onHistory)
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                    ToolRow("截取模板", "框选屏幕区域，保存为任务素材", R.drawable.ic_tool_shot, onCaptureTemplate)
+                    ToolRow("素材管理", "预览、导入与整理图片", R.drawable.ic_tool_color, onManageAssets)
+                    HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                    ToolRow("导出 ZIP", "分享脚本、素材与配置", R.drawable.ic_export, onExportZip)
+                    ToolRow("导出独立 APK", "生成包含该任务的安装包", R.drawable.ic_export, onExportApk)
                     if (TaskManager.isBuiltin(this@MainActivity, taskName)) {
-                        TextButton(onClick = onReset) { Text("重置为官方版本") }
+                        ToolRow("恢复内置任务", "使用官方版本覆盖当前修改", R.drawable.ic_reset, onReset)
                     }
-                    TextButton(onClick = onHistory) {
-                        Text("运行历史（" + RunHistory.read(this@MainActivity, taskName).size + " 条）")
-                    }
-                    TextButton(onClick = onExportZip) { Text("导出 ZIP（脚本+素材+配置）") }
-                    TextButton(onClick = onExportApk) { Text("导出独立 APK（内嵌脚本与素材）") }
-                    TextButton(onClick = onCaptureTemplate) { Text("截取模板（框选屏幕区域存为素材）") }
-                    TextButton(onClick = onManageAssets) { Text("素材管理") }
                 }
             },
             confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
@@ -904,15 +925,13 @@ class MainActivity : ComponentActivity() {
     /** 分区卡片标题：统一「标题 + 可选说明」的层级，替代散落的裸文本 */
     @Composable
     private fun SectionTitle(title: String, hint: String? = null) {
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 8.dp)
         ) {
             Text(title, style = MaterialTheme.typography.titleSmall)
             if (hint != null) {
-                Spacer(modifier = Modifier.width(8.dp))
                 Text(
                     hint,
                     style = MaterialTheme.typography.bodySmall,
@@ -925,7 +944,7 @@ class MainActivity : ComponentActivity() {
     /** 权限状态卡片：每项一行（名称 + 用途 + 状态/动作），触控区 ≥48dp */
     @Composable
     private fun PermissionCard(compact: Boolean) {
-        Card(modifier = Modifier.fillMaxWidth()) {
+        WorkCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(bottom = 6.dp)) {
                 SectionTitle("权限状态", if (compact) null else "点击未开启项去授权")
                 PermissionRow(
@@ -955,7 +974,7 @@ class MainActivity : ComponentActivity() {
                 }
                 PermissionRow(
                     title = "截屏",
-                    desc = if (captureReady) "找图找色 / OCR 可用" else "未授权（可用 Root/Shizuku 静默通道）",
+                    desc = if (captureReady) "找图、取色与文字识别可用" else "可选择录屏授权或 Root / Shizuku",
                     ok = captureReady,
                     okText = "可用",
                     actionText = "设置通道",
@@ -984,11 +1003,12 @@ class MainActivity : ComponentActivity() {
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { onClick() }
-                .padding(horizontal = 14.dp, vertical = if (singleLine) 4.dp else 8.dp),
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             val dotColor = if (ok) MaterialTheme.colorScheme.primary
-            else MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.tertiary
             Box(
                 modifier = Modifier
                     .size(8.dp)
@@ -1007,118 +1027,65 @@ class MainActivity : ComponentActivity() {
                     )
                 }
             }
-            Text(
-                if (ok) okText else actionText,
-                style = MaterialTheme.typography.labelLarge,
-                color = if (ok) MaterialTheme.colorScheme.onSurfaceVariant
-                else MaterialTheme.colorScheme.error
-            )
-        }
-    }
-
-    /**
-     * 工具卡片：拾取/日志/悬浮球开关。
-     * [compact] 下改为 2×2 网格（说明限一行），比逐行列表省约一半高度。
-     */
-    @Composable
-    private fun ToolsCard(launcherEnabled: Boolean, compact: Boolean) {
-        val tools = listOf<Triple<String, String, () -> Unit>>(
-            Triple("取坐标", "点屏幕取点，生成 click(x, y)", { showPicker(PickerOverlay.Mode.POINT) }),
-            Triple("取颜色", "生成 findColor 颜色串（依赖截屏）", { showPicker(PickerOverlay.Mode.COLOR) }),
-            Triple("去截图", "拖拽框选屏幕区域并重命名保存（依赖截屏）", { showPicker(PickerOverlay.Mode.SCREENSHOT) }),
-            Triple("悬浮日志", "浮在屏幕上的实时日志面板", { toggleConsole() }),
-            Triple(
-                if (launcherEnabled) "隐藏悬浮球" else "显示悬浮球",
-                "运行/停止入口，可拖动贴边"
-            ) {
-                if (!overlayGranted) {
-                    FloatyManager.requestOverlayPermission(this@MainActivity)
-                } else {
-                    ScriptRunner.toggleLauncher(this@MainActivity)
-                }
-            }
-        )
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(bottom = 6.dp)) {
-                SectionTitle("工具")
-                if (compact) {
-                    tools.chunked(2).forEach { rowTools ->
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            rowTools.forEach { (title, desc, action) ->
-                                ToolCell(
-                                    title = title,
-                                    desc = desc,
-                                    modifier = Modifier.weight(1f),
-                                    onClick = action
-                                )
-                            }
-                            // 奇数个工具时补空位，避免最后一格被拉伸
-                            if (rowTools.size == 1) Spacer(modifier = Modifier.weight(1f))
-                        }
-                    }
-                } else {
-                    tools.forEach { (title, desc, action) ->
-                        ToolRow(title, desc, action)
-                    }
-                }
+            Spacer(Modifier.width(8.dp))
+            Surface(shape = RoundedCornerShape(8.dp),
+                color = if (ok) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.tertiaryContainer) {
+                Text(if (ok) okText else actionText, style = MaterialTheme.typography.labelMedium,
+                    color = if (ok) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onTertiaryContainer,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
             }
         }
     }
 
-    /** 工具网格单元：标题 + 单行说明 */
+    /** 工具卡片：按屏幕拾取、悬浮控制分组。 */
     @Composable
-    private fun ToolCell(
-        title: String,
-        desc: String,
-        modifier: Modifier = Modifier,
-        onClick: () -> Unit
-    ) {
-        Row(
-            modifier = modifier
-                .clickable { onClick() }
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1)
-                Text(
-                    desc,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
-                )
+    private fun ToolsCard(launcherEnabled: Boolean) {
+        WorkCard(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(bottom = 8.dp)) {
+                SectionTitle("屏幕工具", "拾取结果可直接用于脚本")
+                ToolRow("取坐标", "点选屏幕位置，生成点击代码", R.drawable.ic_tool_point) {
+                    showPicker(PickerOverlay.Mode.POINT)
+                }
+                ToolRow("取颜色", "拾取屏幕颜色，生成找色代码", R.drawable.ic_tool_color) {
+                    showPicker(PickerOverlay.Mode.COLOR)
+                }
+                ToolRow("区域截图", "框选、命名并保存屏幕区域", R.drawable.ic_tool_shot) {
+                    showPicker(PickerOverlay.Mode.SCREENSHOT)
+                }
+                HorizontalDivider(Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                ToolRow("悬浮日志", "在其他应用上方查看实时输出", R.drawable.ic_tool_log) { toggleConsole() }
+                ToolRow(if (launcherEnabled) "隐藏悬浮球" else "显示悬浮球",
+                    if (launcherEnabled) "已开启 · 点击后隐藏" else "随时选择任务、控制运行", R.drawable.ic_floaty) {
+                    if (!overlayGranted) FloatyManager.requestOverlayPermission(this@MainActivity)
+                    else ScriptRunner.toggleLauncher(this@MainActivity)
+                }
             }
-            Text(
-                "›",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 
     /** 工具行：名称 + 用途 + 尾部箭头 */
     @Composable
-    private fun ToolRow(title: String, desc: String, onClick: () -> Unit) {
+    private fun ToolRow(title: String, desc: String, icon: Int = R.drawable.ic_nav_tools, onClick: () -> Unit) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { onClick() }
-                .padding(horizontal = 14.dp, vertical = 8.dp),
+                .heightIn(min = 64.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge)
+            Surface(color = MaterialTheme.colorScheme.secondaryContainer, shape = RoundedCornerShape(12.dp)) {
+                Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) { AppIcon(icon) }
+            }
+            Column(modifier = Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
                 Text(
                     desc,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Text(
-                "›",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            AppIcon(R.drawable.ic_arrow)
         }
     }
 
@@ -1127,45 +1094,58 @@ class MainActivity : ComponentActivity() {
     private fun TaskListSection(runState: ScriptRunner.RunState, modifier: Modifier = Modifier) {
         Column(modifier = modifier.fillMaxWidth()) {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("任务 (${tasks.size})", style = MaterialTheme.typography.titleMedium)
+                Text("全部任务 · ${tasks.size}", style = MaterialTheme.typography.titleSmall)
                 Spacer(modifier = Modifier.weight(1f))
-                TextButton(onClick = { showCreateDialog = true }) { Text("+ 新建任务") }
-                TextButton(onClick = {
+                FilledTonalIconButton(onClick = {
                     importZipLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
-                }) { Text("导入 ZIP") }
+                }, shape = MaterialTheme.shapes.medium) {
+                    AppIcon(R.drawable.ic_import, "导入 ZIP")
+                }
+                Spacer(Modifier.width(4.dp))
+                FilledIconButton(onClick = { showCreateDialog = true },
+                    shape = MaterialTheme.shapes.medium) {
+                    AppIcon(R.drawable.ic_add, "新建任务")
+                }
             }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(bottom = 8.dp)
             ) {
                 items(tasks, key = { it.name }) { task ->
                     TaskRow(task, runState)
                 }
                 if (tasks.isEmpty()) {
                     item {
-                        Text(
-                            "暂无任务，点「+ 新建任务」创建（可选空白/签到模板/找图演示脚手架）",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(vertical = 8.dp)
-                        )
+                        WorkCard(Modifier.fillMaxWidth()) {
+                            Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                AppIcon(R.drawable.ic_nav_tasks, modifier = Modifier.size(40.dp))
+                                Text("创建你的第一个任务", style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.padding(top = 16.dp, bottom = 6.dp))
+                                Text("从空白、签到或找图模板开始，也可导入已有的 ZIP 任务。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    /** Tab 1：权限状态 —— 三项能力 + 当前运行状态 */
+    /** 权限页：三项能力与当前运行状态。 */
     @Composable
     private fun PermissionsTab(runState: ScriptRunner.RunState) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            PageHeading("运行准备", "按需开启权限，随时查看运行状态。")
             PermissionCard(compact = false)
-            Card(modifier = Modifier.fillMaxWidth()) {
+            WorkCard(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(bottom = 6.dp)) {
                     SectionTitle("运行状态", if (runState.running) "任务执行中" else "空闲")
                     Row(
@@ -1176,17 +1156,19 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                runState.taskName ?: "当前无任务运行",
+                                if (runState.running) runState.taskName ?: "任务执行中" else "当前无任务运行",
                                 style = MaterialTheme.typography.bodyLarge
                             )
                             Text(
-                                if (runState.running) "可在标题栏或悬浮球停止" else "在「任务」页选择任务运行",
+                                if (runState.running) "可在顶部运行条或悬浮球停止" else "点击悬浮球，选择任务运行",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         if (runState.running) {
                             TextButton(onClick = { ScriptRunner.stop() }) { Text("停止") }
+                        } else {
+                            TextButton(onClick = { mainTab = 0 }) { Text("去选任务") }
                         }
                     }
                 }
@@ -1194,63 +1176,65 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Tab 2：工具 —— 取坐标/取色/悬浮日志/悬浮球 + 截屏通道入口 */
+    /** 工具页：屏幕工具、悬浮控制与截屏通道。 */
     @Composable
     private fun ToolsTab(launcherEnabled: Boolean) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            ToolsCard(launcherEnabled, compact = false)
-            Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            PageHeading("随手工具", "取点、取色、截图，让脚本编写更轻松。")
+            ToolsCard(launcherEnabled)
+            WorkCard(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(bottom = 6.dp)) {
                     SectionTitle("截屏通道", "Root/Shizuku 静默截屏优先")
                     ToolRow(
                         "截屏通道设置",
-                        "模式：$captureModeName    实际通道：$captureChannelName"
+                        "选择自动、Root、Shizuku 或录屏授权",
+                        R.drawable.ic_tool_shot
                     ) { openCaptureDialog() }
                 }
             }
         }
     }
 
-    /** Tab 3：任务列表 + 运行日志（日志占满剩余空间，便于观察） */
+    /** 日志页：独立显示实时输出。 */
     @Composable
     private fun LogsTab(logs: List<ScriptRunner.LogEntry>) {
-        Card(modifier = Modifier.fillMaxSize()) {
-            Column(modifier = Modifier.fillMaxSize()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("运行日志 (${logs.size})", style = MaterialTheme.typography.titleSmall)
-                    Spacer(modifier = Modifier.weight(1f))
-                    if (logs.isNotEmpty()) {
-                        TextButton(onClick = { ScriptRunner.clearLogs() }) { Text("清空") }
+        Column(Modifier.fillMaxSize()) {
+            PageHeading("运行日志", "查看脚本输出，快速定位问题。")
+            WorkCard(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth()
+                            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("实时输出 · ${logs.size}", style = MaterialTheme.typography.titleSmall)
+                        Spacer(modifier = Modifier.weight(1f))
+                        if (logs.isNotEmpty()) {
+                            TextButton(onClick = { ScriptRunner.clearLogs() }) { Text("清空") }
+                        }
                     }
-                }
-                HorizontalDivider()
-                if (logs.isEmpty()) {
-                    Text(
-                        "暂无日志：运行任务后这里会显示实时输出",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(14.dp)
-                    )
-                } else {
-                    LogPanel(logs, Modifier.fillMaxWidth().weight(1f))
+                    HorizontalDivider()
+                    if (logs.isEmpty()) {
+                        Text("暂无输出\n运行任务后，日志会显示在这里。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp))
+                    } else {
+                        LogPanel(logs, Modifier.fillMaxWidth().weight(1f))
+                    }
                 }
             }
         }
     }
 
-    private fun runTask(name: String) {
-        // 悬浮条是运行期停止入口，必须先有悬浮窗权限；
-        // 无障碍服务未开启时脚本内 auto.waitFor 会等待/引导开启
-        if (!overlayGranted) {
-            FloatyManager.requestOverlayPermission(this)
-            return
+    @Composable
+    private fun PageHeading(title: String, subtitle: String) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+            Text(title, style = MaterialTheme.typography.headlineSmall)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
         }
-        ScriptRunner.run(this, name)
     }
 
     /** 保活指引：降低无障碍服务被系统回收的概率（各厂商后台限制差异较大） */
@@ -1562,26 +1546,43 @@ class MainActivity : ComponentActivity() {
             .height(200.dp)
     ) {
         val listState = rememberLazyListState()
-        LaunchedEffect(logs.size) {
-            if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
+        val scope = rememberCoroutineScope()
+        var followTail by rememberSaveable { mutableStateOf(true) }
+        LaunchedEffect(listState) {
+            // 仅在用户滚动时切换跟随状态，追加日志本身不改变用户的选择。
+            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
+                .collect { (scrolling, hasMore) -> if (scrolling) followTail = !hasMore }
         }
-        LazyColumn(
-            state = listState,
-            modifier = modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-        ) {
-            items(logs) { entry ->
-                Text(
-                    text = "${entry.time} ${entry.msg}",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = when (entry.level) {
-                        'E' -> MaterialTheme.colorScheme.error
-                        'W' -> MaterialTheme.colorScheme.tertiary
-                        'D' -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.colorScheme.onSurface
-                    },
-                    modifier = Modifier.padding(vertical = 1.dp)
-                )
+        LaunchedEffect(logs) {
+            if (logs.isNotEmpty() && followTail) listState.scrollToItem(logs.size - 1)
+        }
+        Box(modifier) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(bottom = if (followTail) 8.dp else 52.dp)
+            ) {
+                items(logs) { entry ->
+                    Text(
+                        text = "${entry.time}  ${entry.level}  ${entry.msg}",
+                        fontSize = 12.sp,
+                        lineHeight = 19.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = when (entry.level) {
+                            'E' -> MaterialTheme.colorScheme.error
+                            'W' -> MaterialTheme.colorScheme.tertiary
+                            'D' -> MaterialTheme.colorScheme.onSurfaceVariant
+                            else -> MaterialTheme.colorScheme.onSurface
+                        },
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                }
+            }
+            if (!followTail) {
+                Button(onClick = {
+                    followTail = true
+                    scope.launch { if (logs.isNotEmpty()) listState.scrollToItem(logs.lastIndex) }
+                }, modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)) { Text("回到最新") }
             }
         }
     }
@@ -1591,50 +1592,57 @@ class MainActivity : ComponentActivity() {
         onDismiss: () -> Unit,
         onConfirm: (String, TaskManager.Scaffold) -> Unit
     ) {
-        var name by mutableStateOf("")
-        var scaffold by mutableStateOf(TaskManager.Scaffold.BLANK)
+        var name by rememberSaveable { mutableStateOf("") }
+        var scaffold by rememberSaveable { mutableStateOf(TaskManager.Scaffold.BLANK) }
+        val trimmed = name.trim()
+        val nameError = when {
+            trimmed.length > 50 -> "名称最多 50 个字符"
+            trimmed.contains('/') || trimmed.contains('\\') || trimmed == "." || trimmed == ".." -> "名称不能包含路径符号"
+            tasks.any { it.name == trimmed } -> "该名称已存在，请换一个名称"
+            else -> null
+        }
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text("新建任务") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it },
                         label = { Text("任务名称") },
-                        singleLine = true
+                        singleLine = true,
+                        isError = nameError != null,
+                        supportingText = { Text(nameError ?: "使用易于辨认的名称，如：每日签到") },
+                        modifier = Modifier.fillMaxWidth()
                     )
                     Text(
-                        "脚手架",
-                        style = MaterialTheme.typography.bodySmall,
+                        "选择起始模板",
+                        style = MaterialTheme.typography.titleSmall,
                         modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
                     )
                     TaskManager.Scaffold.entries.forEach { option ->
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (scaffold == option) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
                                 .clickable { scaffold = option }
-                                .padding(vertical = 6.dp),
+                                .padding(end = 12.dp, top = 6.dp, bottom = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                (if (scaffold == option) "● " else "○ ") + option.label,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (scaffold == option) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.onSurface
-                            )
+                            RadioButton(selected = scaffold == option, onClick = { scaffold = option })
+                            Column(Modifier.weight(1f)) {
+                                Text(option.label, style = MaterialTheme.typography.titleSmall)
+                                Text(option.desc, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
-                        Text(
-                            "    " + option.desc,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
                     }
                 }
             },
             confirmButton = {
-                TextButton(onClick = { onConfirm(name, scaffold) }, enabled = name.isNotBlank()) {
-                    Text("创建")
+                Button(onClick = { onConfirm(trimmed, scaffold) }, enabled = trimmed.isNotBlank() && nameError == null) {
+                    Text("创建并编辑")
                 }
             },
             dismissButton = {

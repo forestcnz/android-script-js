@@ -61,13 +61,13 @@ object FloatyManager {
     private const val TAG_STOP_LABEL = "stop_label"
 
     // 配色（悬浮窗自成体系，不跟随 App 主题，保证在任何应用之上都可读）
-    private const val COLOR_BG = 0xF21F1F27.toInt()
-    private const val COLOR_BG_SOLID = 0xFF1B1B22.toInt()
-    private const val COLOR_ACCENT = 0xFF03DAC5.toInt()
-    private const val COLOR_TEXT = 0xFFEDEDF2.toInt()
-    private const val COLOR_TEXT_DIM = 0xFF9A9AA8.toInt()
-    private const val COLOR_RUNNING = 0xFF4CD964.toInt()
-    private const val COLOR_STOP = 0xFFE5484D.toInt()
+    private const val COLOR_BG = 0xFF1D2B46.toInt()
+    private const val COLOR_BG_SOLID = 0xFF3563D9.toInt()
+    private const val COLOR_ACCENT = 0xFFADC6FF.toInt()
+    private const val COLOR_TEXT = 0xFFFFFFFF.toInt()
+    private const val COLOR_TEXT_DIM = 0xFFBAC9E4.toInt()
+    private const val COLOR_RUNNING = 0xFF78D8C7.toInt()
+    private const val COLOR_STOP = 0xFFBA3D4C.toInt()
     private const val COLOR_DIVIDER = 0x33FFFFFF
 
     private fun prefs(context: Context) =
@@ -460,9 +460,9 @@ object FloatyManager {
         )
         frame.addView(
             android.widget.ImageView(context).apply {
-                setImageResource(com.script.js.R.drawable.ic_floaty_logo)
+                setImageResource(com.script.js.R.drawable.ic_brand_mark)
                 scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
-                setPadding((9 * d).toInt(), (9 * d).toInt(), (9 * d).toInt(), (9 * d).toInt())
+                setPadding((2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt())
             },
             android.widget.FrameLayout.LayoutParams(size, size)
         )
@@ -489,7 +489,7 @@ object FloatyManager {
     }
 
     /**
-     * 运行态停止按钮：红色圆形（尺寸与空闲球一致），纯视觉控件。
+     * 运行态停止按钮：深灰底白色方块（尺寸与空闲球一致）。
      * 长按 3 秒停止的手势由悬浮控件触摸监听处理，这里只负责外观；
      * 文案视图带 [TAG_STOP_LABEL] 标记，长按倒计时（3→2→1）由 [beginLongPressStop] 更新。
      */
@@ -738,7 +738,7 @@ object FloatyManager {
      * 展开/收起面板（每次展开重新读取任务列表与运行状态）。
      * 布局：卡片式，自上而下 = 头部（选择任务 + 关闭） / 任务列表（双列紧凑格子，可滚动） /
      * 工具图标行（4 个均分图标按钮） / 运行中任务显示「■ 停止当前任务」 / 底部「✕ 关闭悬浮窗」。
-     * 宽度固定 268dp，展开时面板在屏幕正中显示（水平+垂直居中，不跟随悬浮球、不靠边）。
+     * 宽度不超过 284dp，按内容高度在屏幕正中显示。
      * 面板展开期间悬浮球暂时隐藏（避免遮挡），收起面板时自动恢复。
      * 按住面板标题栏（「≡ 选择任务」区域）可整体拖动面板，✕ 按钮与列表滚动不受影响。
      */
@@ -767,7 +767,7 @@ object FloatyManager {
             setPadding((14 * d).toInt(), (6 * d).toInt(), (8 * d).toInt(), (6 * d).toInt())
         }
         header.addView(
-            textView(context, "≡ 选择任务", 13f, COLOR_TEXT).apply {
+            textView(context, "选择任务", 15f, COLOR_TEXT).apply {
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             },
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -785,7 +785,10 @@ object FloatyManager {
         panel.addView(divider(context))
 
         // —— 任务列表（双列紧凑格子，可滚动，最长 42% 屏高） ——
-        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        val list = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((8 * d).toInt(), (8 * d).toInt(), (4 * d).toInt(), (4 * d).toInt())
+        }
         if (tasks.isEmpty()) {
             list.addView(menuText(context, "（暂无任务，先在 App 里新建）") { })
         } else {
@@ -802,7 +805,10 @@ object FloatyManager {
                                 onTaskSelected?.invoke(name)
                             }
                         },
-                        LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                        LinearLayout.LayoutParams(0, (44 * d).toInt(), 1f).apply {
+                            marginEnd = (4 * d).toInt()
+                            bottomMargin = (4 * d).toInt()
+                        }
                     )
                 }
                 // 单数任务补空占位，保证最后一行格子仍然左对齐等宽
@@ -812,18 +818,26 @@ object FloatyManager {
                 list.addView(gridRow)
             }
         }
-        val scroll = ScrollView(context).apply {
-            addView(list)
-            isFillViewport = true
+        val maxListHeight = (realScreenSize(context).y * 0.42f).toInt().coerceAtLeast((48 * d).toInt())
+        val scroll = object : ScrollView(context) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val parentLimit = View.MeasureSpec.getSize(heightMeasureSpec)
+                val limit = if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.UNSPECIFIED)
+                    maxListHeight else maxListHeight.coerceAtMost(parentLimit)
+                super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST))
+            }
+        }.apply {
+            addView(list, android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            isFillViewport = false
         }
-        val maxListHeight = (context.resources.displayMetrics.heightPixels * 0.42f).toInt()
-        // 双列布局：高度按行数（每行 45dp = 格子 40dp + 下边距 5dp）估算
-        val rowCount = (tasks.size + 1) / 2
         panel.addView(
             scroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                (rowCount * 45 * d).toInt().coerceAtMost(maxListHeight).coerceAtLeast((45 * d).toInt())
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
@@ -842,7 +856,7 @@ object FloatyManager {
             hideTaskPanel()
             PickerOverlay.show(context, PickerOverlay.Mode.COLOR)
         })
-        tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_tool_shot, "去截图") {
+        tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_tool_shot, "截图") {
             hideTaskPanel()
             PickerOverlay.show(context, PickerOverlay.Mode.SCREENSHOT)
         })
@@ -893,7 +907,7 @@ object FloatyManager {
         // （displayMetrics 高 2064 vs 实际 1920，最大窗口度量 1030x2064 vs 实际 1080x1920），
         // 会导致「看起来不居中」；交由系统按真实显示帧居中最稳，也不再需要布局监听校正。
         // 注意：CENTER 重力下 params.x/y 是「相对屏幕中心的偏移量」，头部拖动直接累加偏移。
-        val panelW = (268 * d).toInt()
+        val panelW = (284 * d).toInt().coerceAtMost((context.resources.displayMetrics.widthPixels - 32 * d).toInt()).coerceAtLeast(1)
         val params = overlayParams(Gravity.CENTER, x = 0, y = 0)
         params.width = panelW
         try {
@@ -975,7 +989,7 @@ object FloatyManager {
 
     /**
      * 任务格子（双列紧凑布局）：左 ▶ 强调色 + 任务名（单行截断）+（运行中）标记。
-     * 整格 40dp 可点，格子间留 5dp 间距，左右成对排布让列表更紧凑。
+     * 单元高度与间距由添加到行时的 LayoutParams 统一设置。
      */
     private fun taskCell(
         context: Context,
@@ -1005,34 +1019,28 @@ object FloatyManager {
         if (running) {
             cell.addView(
                 textView(context, "运行中", 9f, COLOR_RUNNING).apply {
-                    background = roundedBackground(0x224CD964, 7 * d, 1 * d, 0x554CD964)
+                    background = roundedBackground(0x22FFFFFF, 7 * d, 1 * d, 0x55FFFFFF)
                     setPadding((6 * d).toInt(), (2 * d).toInt(), (6 * d).toInt(), (2 * d).toInt())
                 }
             )
         }
-        cell.layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, (40 * d).toInt()
-        ).apply {
-            marginEnd = (5 * d).toInt()
-            bottomMargin = (5 * d).toInt()
-        }
         return cell
     }
 
-    /** 工具图标按钮：浅底圆角方块 + 居中图标（一行 4 个均分，无文字），desc 用于无障碍朗读 */
+    /** 紧凑工具按钮：仅显示图标，保留无障碍描述。 */
     private fun toolIconButton(context: Context, iconRes: Int, desc: String, onClick: () -> Unit): View {
         val d = context.resources.displayMetrics.density
         return android.widget.ImageView(context).apply {
             setImageResource(iconRes)
             setColorFilter(COLOR_TEXT)
-            background = roundedBackground(0x1FFFFFFF, 14 * d, 1 * d, 0x22FFFFFF)
             scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
-            setPadding((11 * d).toInt(), (11 * d).toInt(), (11 * d).toInt(), (11 * d).toInt())
+            background = roundedBackground(0x1FFFFFFF, 8 * d, 1 * d, 0x22FFFFFF)
+            setPadding((12 * d).toInt(), (12 * d).toInt(), (12 * d).toInt(), (12 * d).toInt())
             contentDescription = desc
             isClickable = true
             setOnClickListener { onClick() }
         }.also {
-            it.layoutParams = LinearLayout.LayoutParams(0, (46 * d).toInt(), 1f).apply {
+            it.layoutParams = LinearLayout.LayoutParams(0, (48 * d).toInt(), 1f).apply {
                 marginEnd = (6 * d).toInt()
             }
         }
@@ -1100,7 +1108,7 @@ object FloatyManager {
         val density = context.resources.displayMetrics.density
         return TextView(context).apply {
             text = label
-            setTextColor(0xFFEDEDF2.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
             textSize = 14f
             setPadding((14 * density).toInt(), (12 * density).toInt(), (14 * density).toInt(), (12 * density).toInt())
             isClickable = true

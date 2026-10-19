@@ -18,12 +18,12 @@ import androidx.compose.ui.text.input.VisualTransformation
  */
 object JsHighlighter {
 
-    // 配色（深浅色主题下均可读）
-    private val COLOR_KEYWORD = Color(0xFFC792EA)
-    private val COLOR_STRING = Color(0xFF3FA34D)
-    private val COLOR_COMMENT = Color(0xFF8A8A96)
-    private val COLOR_NUMBER = Color(0xFFD2691E)
-    private val COLOR_API = Color(0xFF2962FF)
+    // 与编辑器白底配套，保证细小代码文本的对比度。
+    private val COLOR_KEYWORD = Color(0xFF3563D9)
+    private val COLOR_STRING = Color(0xFF22756D)
+    private val COLOR_COMMENT = Color(0xFF78849A)
+    private val COLOR_NUMBER = Color(0xFF97521E)
+    private val COLOR_API = Color(0xFF6B49A6)
 
     private val KEYWORDS = setOf(
         "var", "let", "const", "function", "return", "if", "else", "for", "while", "do",
@@ -68,7 +68,7 @@ object JsHighlighter {
             lineRange(text, errorLine)?.let { range ->
                 if (!range.isEmpty()) {
                     addStyle(
-                        SpanStyle(background = Color(0x33D32F2F)),
+                        SpanStyle(background = Color(0x22BA3D4C)),
                         range.first,
                         range.last + 1
                     )

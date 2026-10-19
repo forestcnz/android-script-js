@@ -154,7 +154,7 @@ object PickerOverlay {
         val density = context.resources.displayMetrics.density
         val padding = (18f * density).toInt()
         val root = FrameLayout(context).apply {
-            setBackgroundColor(0xEE101014.toInt())
+            setBackgroundColor(0xFF1D2B46.toInt())
             isClickable = true
             isFocusable = true
         }
@@ -177,7 +177,7 @@ object PickerOverlay {
         }
         val pathHint = TextView(context).apply {
             text = screenshotDir(context).absolutePath
-            setTextColor(0xFFBBBBBB.toInt())
+            setTextColor(0xFFBAC9E4.toInt())
             textSize = 11f
         }
         val buttons = LinearLayout(context).apply {
@@ -398,13 +398,13 @@ object PickerOverlay {
         }
         private val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             textSize = 11f * density
-            color = 0xFFBBBBBB.toInt()
+            color = 0xFFBAC9E4.toInt()
         }
         private val panelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xE6000000.toInt()
+            color = 0xF21D2B46.toInt()
         }
         private val crossPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = 0xFF03DAC5.toInt()
+            color = 0xFFFFFFFF.toInt()
             style = Paint.Style.STROKE
             strokeWidth = 2f * density
         }

@@ -139,7 +139,7 @@ object ConsoleOverlay {
 
         val root = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            background = rounded(0xF5121218.toInt(), 16 * d, 1 * d, 0x26FFFFFF)
+            background = rounded(0xFF1D2B46.toInt(), 16 * d, 1 * d, 0x26FFFFFF)
             clipToOutline = true
         }
 
@@ -151,7 +151,7 @@ object ConsoleOverlay {
         }
         val title = TextView(context).apply {
             text = "日志"
-            setTextColor(0xFFEDEDF2.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
             textSize = 13f
             typeface = Typeface.DEFAULT_BOLD
         }
@@ -203,7 +203,7 @@ object ConsoleOverlay {
             visibility = View.GONE
         }
         footerText = TextView(context).apply {
-            setTextColor(0xFF9A9AA8.toInt())
+            setTextColor(0xFFBAC9E4.toInt())
             textSize = 11f
             typeface = Typeface.MONOSPACE
         }
@@ -213,7 +213,7 @@ object ConsoleOverlay {
                 text = "■ 停止"
                 setTextColor(Color.WHITE)
                 textSize = 12f
-                background = rounded(0xFFE5484D.toInt(), 10 * d, 0f, 0)
+                background = rounded(0xFFBA3D4C.toInt(), 10 * d, 0f, 0)
                 setPadding((14 * d).toInt(), (7 * d).toInt(), (14 * d).toInt(), (7 * d).toInt())
                 isClickable = true
                 setOnClickListener {
@@ -335,12 +335,12 @@ object ConsoleOverlay {
         return TextView(context).apply {
             text = label
             textSize = 11f
-            setTextColor(if (selected) 0xFF10131A.toInt() else 0xFFB9B9C6.toInt())
+            setTextColor(if (selected) 0xFF2346A0.toInt() else 0xFFBAC9E4.toInt())
             background = rounded(
-                if (selected) 0xFF03DAC5.toInt() else 0x1FFFFFFF,
+                if (selected) 0xFFE7EEFF.toInt() else 0x1FFFFFFF,
                 12 * d,
                 1 * d,
-                if (selected) 0xFF03DAC5.toInt() else 0x22FFFFFF
+                if (selected) 0xFFE7EEFF.toInt() else 0x22FFFFFF
             )
             setPadding((10 * d).toInt(), (4 * d).toInt(), (10 * d).toInt(), (4 * d).toInt())
             isClickable = true
@@ -442,17 +442,17 @@ object ConsoleOverlay {
 
     /** 级别着色：E=红、W=琥珀、D=灰、其余=白 */
     private fun colorFor(level: Char): Int = when (level) {
-        'E' -> 0xFFFF6B6B.toInt()
-        'W' -> 0xFFFFC857.toInt()
-        'D' -> 0xFF9E9E9E.toInt()
-        else -> 0xFFE8E8E8.toInt()
+        'E' -> 0xFFFFA8B1.toInt()
+        'W' -> 0xFFFFD399.toInt()
+        'D' -> 0xFFBAC9E4.toInt()
+        else -> 0xFFFFFFFF.toInt()
     }
 
     private fun actionText(context: Context, label: String, onClick: () -> Unit): TextView {
         val d = context.resources.displayMetrics.density
         return TextView(context).apply {
             text = label
-            setTextColor(0xFF03DAC5.toInt())
+            setTextColor(0xFFFFFFFF.toInt())
             textSize = 13f
             gravity = Gravity.CENTER
             setPadding((10 * d).toInt(), (2 * d).toInt(), (10 * d).toInt(), (2 * d).toInt())

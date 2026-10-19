@@ -26,6 +26,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,8 +47,11 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import com.script.js.core.image.ScreenCapture
 import com.script.js.core.task.TaskManager
+import com.script.js.ui.ScriptTheme
+import com.script.js.ui.AppIcon
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.lifecycle.lifecycleScope
@@ -82,7 +89,7 @@ class TemplateCaptureActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         ScreenCapture.bind(this) { intent -> projectionLauncher.launch(intent) }
         setContent {
-            MaterialTheme {
+            ScriptTheme {
                 CaptureScreen()
             }
         }
@@ -121,14 +128,20 @@ class TemplateCaptureActivity : ComponentActivity() {
         Scaffold(
             topBar = {
                 TopAppBar(
-                    title = { Text("截取模板 → $taskName") },
+                    navigationIcon = { IconButton(onClick = { finish() }) { AppIcon(R.drawable.ic_back, "返回") } },
+                    title = {
+                        Column {
+                            Text("截取模板", style = MaterialTheme.typography.titleMedium)
+                            Text(taskName, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                                overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
                     actions = {
                         TextButton(onClick = { captureFrame() }) { Text("重截") }
                         TextButton(
                             onClick = { openSaveDialog() },
-                            enabled = selection != null
+                            enabled = selectionValid()
                         ) { Text("保存") }
-                        TextButton(onClick = { finish() }) { Text("取消") }
                     }
                 )
             }
@@ -142,17 +155,20 @@ class TemplateCaptureActivity : ComponentActivity() {
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
-                        .background(Color(0xFF101014))
+                        .background(Color(0xFF1D2B46))
                         .onSizeChanged { viewSize = it },
                     contentAlignment = Alignment.Center
                 ) {
                     val bmp = bitmap
                     if (bmp == null) {
-                        Text(
-                            error ?: "正在截屏…",
-                            color = Color.White,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
+                        Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            if (error == null) {
+                                CircularProgressIndicator(color = Color(0xFFADC6FF))
+                                Spacer(Modifier.height(16.dp))
+                            }
+                            Text(error ?: "正在获取屏幕截图…", color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium)
+                        }
                     } else {
                         Image(
                             bitmap = bmp.asImageBitmap(),
@@ -199,7 +215,7 @@ class TemplateCaptureActivity : ComponentActivity() {
                             drawRect(dim, Offset(rect.right, rect.top), Size(size.width - rect.right, rect.height))
                             // 选区边框
                             drawRect(
-                                color = Color(0xFF03DAC5),
+                                color = Color(0xFFADC6FF),
                                 topLeft = rect.topLeft,
                                 size = rect.size,
                                 style = Stroke(width = 3f)
@@ -220,11 +236,13 @@ class TemplateCaptureActivity : ComponentActivity() {
                     Text(
                         if (bitmap == null) "等待截图"
                         else if (sel == null) "在截图上拖拽，框选要作为模板的区域"
-                        else "选区: ${sel.width()} x ${sel.height()}  @(${sel.left}, ${sel.top})",
-                        style = MaterialTheme.typography.bodySmall
+                        else if (!selectionValid()) "${sel.width()} × ${sel.height()} px\n选区至少需要 ${MIN_SIZE} × ${MIN_SIZE} px"
+                        else "${sel.width()} × ${sel.height()} px\n起点 (${sel.left}, ${sel.top})",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f).padding(end = 12.dp)
                     )
                     if (bitmap != null && sel != null) {
-                        Button(onClick = { openSaveDialog() }) { Text("保存为模板") }
+                        Button(onClick = { openSaveDialog() }, enabled = selectionValid()) { Text("保存模板") }
                     }
                 }
             }
@@ -286,10 +304,12 @@ class TemplateCaptureActivity : ComponentActivity() {
     }
 
     private fun openSaveDialog() {
-        if (selection == null || bitmap == null) return
+        if (!selectionValid() || bitmap == null) return
         if (fileName.isBlank()) fileName = TaskManager.suggestImageName(this, taskName)
         showSaveDialog = true
     }
+
+    private fun selectionValid(): Boolean = selection?.let { it.width() >= MIN_SIZE && it.height() >= MIN_SIZE } == true
 
     /** 裁剪选区并写入任务 images/ 目录 */
     private fun saveSelection() {
