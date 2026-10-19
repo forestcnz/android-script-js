@@ -23,7 +23,7 @@ import android.widget.TextView
  *
  * 控件有状态，就地变形而不是叠加多个窗口：
  * - 空闲态：胶囊「JS」，点击展开面板，拖动可移动并自动贴边（位置会记住）；
- * - 运行态：同一胶囊变成「▶ 任务名  ■ 停止」，点击停止中断脚本。
+ * - 运行态：变成圆形停止按钮（不显示任务名），单击提示、双击停止脚本。
  *
  * 贴边后空闲球半隐藏：约一半探出屏外，点击先弹出完整显示，再次点击才展开面板；
  * 运行态胶囊完整贴边（停止键保持可见）。半隐藏位置会持久化，重启后保持贴边形态。
@@ -271,6 +271,8 @@ object FloatyManager {
                         moved -> snapToEdge(context, wm, capsule, params)
                         // 半隐藏贴边第一次点击：先完整弹出，下一次点击才展开面板
                         popOutIfDocked(context, wm, capsule, params) -> Unit
+                        // 运行态：整个控件是圆形停止按钮，单击/双击由按钮自己处理，不展开面板
+                        runningTask != null -> Unit
                         else -> toggleTaskPanel(context, wm, params)
                     }
                     false
@@ -313,7 +315,7 @@ object FloatyManager {
         Log.i(TAG, "悬浮控件已隐藏")
     }
 
-    /** 切换到运行态：胶囊就地变成「● 任务名 计时 ■」 */
+    /** 切换到运行态：悬浮控件就地变成圆形停止按钮（单击提示，双击停止） */
     fun setRunning(context: Context, taskName: String) {
         val wasIdle = runningTask == null
         runningTask = taskName
@@ -325,7 +327,7 @@ object FloatyManager {
                 return
             }
         }
-        // 半隐藏贴边球就地变成运行胶囊：不再探出屏外（避免挡住停止键）
+        // 半隐藏贴边球就地变成圆形停止按钮：不再探出屏外（避免挡住停止按钮）
         dockedSide = DockSide.NONE
         renderCapsule(context)
         startTicker(context)
@@ -353,7 +355,7 @@ object FloatyManager {
     /**
      * 按当前状态重建胶囊内容：
      * - 空闲：52dp 圆球「JS」+ 右下角状态点（绿=就绪），半透明避免遮挡；
-     * - 运行：圆角胶囊 = 状态点 + 「▶ 任务名」+ 计时(mm:ss) + 红色停止键。
+     * - 运行：一个圆形停止按钮（不显示任务名），单击提示、双击停止任务。
      */
     @SuppressLint("SetTextI18n")
     private fun renderCapsule(context: Context) {
@@ -367,23 +369,10 @@ object FloatyManager {
             capsule.alpha = 0.92f
             capsule.addView(ballView(context))
         } else {
-            capsule.setPadding(
-                (7 * d).toInt(), (6 * d).toInt(), (6 * d).toInt(), (6 * d).toInt()
-            )
-            capsule.background = roundedBackground(COLOR_BG, 26 * d, 1 * d, 0x22FFFFFF)
+            // 运行态：整个悬浮控件就是一个圆形停止按钮（任务名等细节看运行日志/通知栏）
+            capsule.setPadding(0, 0, 0, 0)
+            capsule.background = null
             capsule.alpha = 1f
-            capsule.addView(statusDot(context))
-            capsule.addView(
-                textView(context, "▶ ${ellipsize(task, 8)}", 13f, COLOR_TEXT).apply {
-                    maxLines = 1
-                    setPadding((8 * d).toInt(), 0, (10 * d).toInt(), 0)
-                }
-            )
-            timerView = textView(context, elapsedText(), 11f, COLOR_TEXT_DIM).apply {
-                typeface = android.graphics.Typeface.MONOSPACE
-                setPadding(0, 0, (10 * d).toInt(), 0)
-            }
-            capsule.addView(timerView)
             capsule.addView(stopButton(context))
         }
         capsuleView?.let { view ->
@@ -470,17 +459,36 @@ object FloatyManager {
         }
     }
 
-    /** 运行态停止键：红色圆角方块，点击中断脚本 */
+    /**
+     * 运行态停止按钮：红色圆形（尺寸与空闲球一致）。
+     * 单击 = Toast 提示「再点一次停止任务」；双击（400ms 内）= 中断脚本。
+     */
     private fun stopButton(context: Context): View {
         val d = context.resources.displayMetrics.density
-        return textView(context, "■ 停止", 12f, 0xFFFFFFFF.toInt()).apply {
-            background = roundedBackground(COLOR_STOP, 8 * d, 0f, 0)
-            setPadding((10 * d).toInt(), (6 * d).toInt(), (10 * d).toInt(), (6 * d).toInt())
+        val size = (BALL_SIZE_DP * d).toInt()
+        var lastClickAt = 0L
+        return textView(context, "■", 18f, 0xFFFFFFFF.toInt()).apply {
+            gravity = Gravity.CENTER
+            background = roundedBackground(COLOR_STOP, 26 * d, 1.5f * d, 0x66FFFFFF)
             isClickable = true
             setOnClickListener {
-                Log.i(TAG, "悬浮控件停止按钮点击, 回调已绑定=${onStopClicked != null}")
-                onStopClicked?.invoke()
+                val now = System.currentTimeMillis()
+                if (now - lastClickAt < 400) {
+                    // 双击：停止任务
+                    lastClickAt = 0L
+                    Log.i(TAG, "悬浮控件双击停止, 回调已绑定=${onStopClicked != null}")
+                    onStopClicked?.invoke()
+                } else {
+                    // 单击：提示双击可停止
+                    lastClickAt = now
+                    Log.i(TAG, "悬浮控件停止按钮单击（等待第二次点击）")
+                    android.widget.Toast.makeText(
+                        context, "再点一次停止任务", android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
+        }.also { view ->
+            view.layoutParams = LinearLayout.LayoutParams(size, size)
         }
     }
 
@@ -491,8 +499,12 @@ object FloatyManager {
 
     private val ticker = object : Runnable {
         override fun run() {
-            timerView?.text = elapsedText()
-            if (runningTask != null) handler.postDelayed(this, 1000L)
+            // 运行态已简化为圆形停止按钮（无计时显示）：没有计时视图时不再循环，避免每秒空转
+            val tv = timerView
+            if (tv != null) {
+                tv.text = elapsedText()
+                if (runningTask != null) handler.postDelayed(this, 1000L)
+            }
         }
     }
 

@@ -22,7 +22,7 @@ object GestureClient {
     @Volatile
     var onFallback: ((String) -> Unit)? = null
 
-    /** 坐标点击：短暂按下后抬起 */
+    /** 坐标点击：短暂按下后抬起；成功后显示点击特效（让用户看到任务点在哪里） */
     fun click(x: Float, y: Float, durationMs: Long = 30): Boolean {
         val svc = service()
         if (svc != null) {
@@ -30,14 +30,20 @@ object GestureClient {
                 moveTo(x, y)
                 lineTo(x, y)
             }
-            if (dispatch(svc, path, durationMs)) return true
+            if (dispatch(svc, path, durationMs)) {
+                ClickEffect.show(x, y)
+                return true
+            }
             notifyFallback("手势派发失败（服务异常或超时）")
         } else {
             notifyFallback("无障碍服务不可用")
         }
         // 增强通道兜底：有 Root 时改用 input
         return InputFallback.tap(x, y, durationMs).also { ok ->
-            if (ok) notifyFallback("已改用 Root input tap 完成点击")
+            if (ok) {
+                ClickEffect.show(x, y)
+                notifyFallback("已改用 Root input tap 完成点击")
+            }
         }
     }
 
