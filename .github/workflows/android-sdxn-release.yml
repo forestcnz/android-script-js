@@ -62,7 +62,7 @@ jobs:
         run: |
           short_sha="${GITHUB_SHA::7}"
           tag="sdxn-build-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-${short_sha}"
-          title="神雕侠侣助手 ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT} (${short_sha})"
+          title="雕雕助手 ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT} (${short_sha})"
           notes=$(cat <<EOF
           Automated SDXN debug build from the sdxn branch.
 
