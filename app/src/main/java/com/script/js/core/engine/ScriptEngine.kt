@@ -140,8 +140,19 @@ object ScriptEngine {
 
     /** 注入全局 Bridge：JS 函数名 → Kotlin 实现（全部同步绑定） */
     private fun QuickJs.defineGlobals(session: Session, env: ScriptEnv) {
+        // 带停止检查的绑定注册：每个绑定函数入口先查停止标志。
+        // stop() 后引擎线程无法强杀（QuickJS 1.0.5 无 VM 级中断），只能靠检查点中断；
+        // 逐个入口检查保证「最多等当前正在执行的一个原生调用（截屏/找图/OCR）结束即停止」，
+        // 而不是把本轮循环剩余的所有调用跑完，显著缩短停止响应延迟。
+        fun guard(name: String, block: (args: Array<Any?>) -> Any?) {
+            function(name) { args ->
+                checkStop(session)
+                block(args)
+            }
+        }
+
         // —— 基础工具（API 1.2）——
-        function("sleep") { args ->
+        guard("sleep") { args ->
             val ms = (args.getOrNull(0) as? Number)?.toLong() ?: 0L
             var remaining = ms.coerceAtLeast(0)
             while (remaining > 0) {
@@ -152,59 +163,59 @@ object ScriptEngine {
             }
             null
         }
-        function("random") { args ->
+        guard("random") { args ->
             val min = (args.getOrNull(0) as? Number)?.toInt() ?: 0
             val max = (args.getOrNull(1) as? Number)?.toInt() ?: 0
             if (max <= min) min else Random.nextInt(min, max + 1)
         }
-        function("exit") { _ ->
+        guard("exit") { _ ->
             throw ScriptExitException()
         }
-        function("toastLog") { args ->
+        guard("toastLog") { args ->
             val msg = args.getOrNull(0)?.toString() ?: ""
             env.onLog('I', msg)
             env.onToast(msg)
             null
         }
-        function("__log") { args ->
+        guard("__log") { args ->
             val level = (args.getOrNull(0) as? String)?.firstOrNull() ?: 'I'
             env.onLog(level, args.getOrNull(1)?.toString() ?: "")
             null
         }
 
         // —— 无障碍（API 1.1）——
-        function("__autoService") { _ -> GestureClient.available() }
-        function("__autoWaitFor") { args ->
+        guard("__autoService") { _ -> GestureClient.available() }
+        guard("__autoWaitFor") { args ->
             val timeoutMs = (args.getOrNull(0) as? Number)?.toLong() ?: 0L
-            if (GestureClient.available()) return@function true
+            if (GestureClient.available()) return@guard true
             env.onLog('I', "等待无障碍服务开启…")
             val start = System.currentTimeMillis()
             while (!GestureClient.available()) {
                 checkStop(session)
                 if (System.currentTimeMillis() - start >= timeoutMs) {
                     env.onLog('W', "无障碍服务未开启，坐标操作将返回 false")
-                    return@function false
+                    return@guard false
                 }
                 Thread.sleep(100)
             }
             env.onLog('I', "无障碍服务已就绪")
             true
         }
-        function("__autoOpenSettings") { _ ->
+        guard("__autoOpenSettings") { _ ->
             env.onLog('I', "跳转无障碍设置页")
             env.openAccessibilitySettings()
             null
         }
 
         // —— 坐标与手势（API 2.1，默认参数在绑定侧处理；坐标经 adapter 换算到真机）——
-        function("click") { args ->
-            val (x, y) = xy(args) ?: return@function false
+        guard("click") { args ->
+            val (x, y) = xy(args) ?: return@guard false
             val duration = (args.getOrNull(2) as? Number)?.toLong() ?: 30L
             GestureClient.click(rx(x), ry(y), duration)
                 .also { logGesture(env, "click", x, y, it) }
         }
-        function("clickRandom") { args ->
-            val (x, y) = xy(args) ?: return@function false
+        guard("clickRandom") { args ->
+            val (x, y) = xy(args) ?: return@guard false
             val range = (args.getOrNull(2) as? Number)?.toFloat() ?: 5f
             val duration = (args.getOrNull(3) as? Number)?.toLong() ?: 100L
             val ox = Random.nextFloat() * 2 * range - range
@@ -212,20 +223,20 @@ object ScriptEngine {
             GestureClient.click(rx(x + ox), ry(y + oy), duration)
                 .also { logGesture(env, "clickRandom", x + ox, y + oy, it) }
         }
-        function("longClick") { args ->
-            val (x, y) = xy(args) ?: return@function false
+        guard("longClick") { args ->
+            val (x, y) = xy(args) ?: return@guard false
             val duration = (args.getOrNull(2) as? Number)?.toLong() ?: 600L
             GestureClient.longClick(rx(x), ry(y), duration)
                 .also { logGesture(env, "longClick", x, y, it) }
         }
-        function("press") { args ->
-            val (x, y) = xy(args) ?: return@function false
+        guard("press") { args ->
+            val (x, y) = xy(args) ?: return@guard false
             val duration = (args.getOrNull(2) as? Number)?.toLong() ?: 500L
             GestureClient.longClick(rx(x), ry(y), duration)
                 .also { logGesture(env, "press", x, y, it) }
         }
-        function("swipe") { args ->
-            if (args.size < 4 || !args.take(4).all { it is Number }) return@function false
+        guard("swipe") { args ->
+            if (args.size < 4 || !args.take(4).all { it is Number }) return@guard false
             val duration = (args.getOrNull(4) as? Number)?.toLong() ?: 500L
             val x1 = (args[0] as Number).toFloat()
             val y1 = (args[1] as Number).toFloat()
@@ -234,8 +245,8 @@ object ScriptEngine {
             GestureClient.swipe(rx(x1), ry(y1), rx(x2), ry(y2), duration)
                 .also { logGesture(env, "swipe", x1, y1, it, x2, y2) }
         }
-        function("swipeRandom") { args ->
-            if (args.size < 4 || !args.take(4).all { it is Number }) return@function false
+        guard("swipeRandom") { args ->
+            if (args.size < 4 || !args.take(4).all { it is Number }) return@guard false
             val range = (args.getOrNull(4) as? Number)?.toFloat() ?: 10f
             val duration = (args.getOrNull(5) as? Number)?.toLong() ?: 500L
             fun rnd(v: Number) = v.toFloat() + Random.nextFloat() * 2 * range - range
@@ -246,8 +257,8 @@ object ScriptEngine {
             GestureClient.swipe(rx(x1), ry(y1), rx(x2), ry(y2), duration)
                 .also { logGesture(env, "swipeRandom", x1, y1, it, x2, y2) }
         }
-        function("gesture") { args ->
-            val duration = (args.getOrNull(0) as? Number)?.toLong() ?: return@function false
+        guard("gesture") { args ->
+            val duration = (args.getOrNull(0) as? Number)?.toLong() ?: return@guard false
             var delayMs = 0L
             val points = ArrayList<Pair<Float, Float>>()
             for (a in args.drop(1)) {
@@ -264,20 +275,20 @@ object ScriptEngine {
         }
 
         // —— 多指手势（API 2.2；扁平数组传参，避免嵌套数组转换差异）——
-        function("__gestures_available") { _ -> GestureClient.available() }
-        function("__gestures") { args ->
-            val flat = args.getOrNull(0) as? List<*> ?: return@function false
+        guard("__gestures_available") { _ -> GestureClient.available() }
+        guard("__gestures") { args ->
+            val flat = args.getOrNull(0) as? List<*> ?: return@guard false
             fun num(i: Int) = (flat.getOrNull(i) as? Number)?.toLong() ?: 0L
             var idx = 0
             val count = num(idx++).toInt()
-            if (count <= 0) return@function false
+            if (count <= 0) return@guard false
             val strokes = ArrayList<GestureClient.Stroke>(count)
             for (s in 0 until count) {
                 if (idx + 2 >= flat.size) break
                 val duration = num(idx++)
                 val delay = num(idx++)
                 val pointCount = num(idx++).toInt()
-                if (pointCount < 2 || idx + pointCount * 2 > flat.size) return@function false
+                if (pointCount < 2 || idx + pointCount * 2 > flat.size) return@guard false
                 val pts = ArrayList<Pair<Float, Float>>(pointCount)
                 for (p in 0 until pointCount) {
                     val x = num(idx++).toFloat()
@@ -286,7 +297,7 @@ object ScriptEngine {
                 }
                 strokes.add(GestureClient.Stroke(duration, delay, pts))
             }
-            if (strokes.isEmpty()) return@function false
+            if (strokes.isEmpty()) return@guard false
             // 多笔必须同时起手：各指延迟不一致时统一为同时（否则系统会拒绝该手势）
             val delays = strokes.map { it.startDelayMs }.distinct()
             val common = if (delays.size == 1) delays[0] else 0L
@@ -306,39 +317,39 @@ object ScriptEngine {
         }
 
         // —— OCR（API 第 4 节；结果为扁平数组，由 PRELUDE 组装成 OcrItem）——
-        function("__ocr_init") { args ->
+        guard("__ocr_init") { args ->
             val engine = args.getOrNull(0)?.toString()
             val ok = OcrApi.init(engine)
             env.onLog(if (ok) 'I' else 'E', "OCR 初始化: ${engine ?: "mlkit"} -> $ok")
             ok
         }
-        function("__ocr_ready") { _ -> OcrApi.isReady() }
-        function("__ocr_recognize") { args ->
-            val bmp = ImageApi.image((args.getOrNull(0) as? Number)?.toInt()) ?: return@function emptyList<Any>()
+        guard("__ocr_ready") { _ -> OcrApi.isReady() }
+        guard("__ocr_recognize") { args ->
+            val bmp = ImageApi.image((args.getOrNull(0) as? Number)?.toInt()) ?: return@guard emptyList<Any>()
             OcrApi.recognize(bmp, regionOf(args, 1)).map { ocrItem(it) }
         }
-        function("__ocr_text") { args ->
-            val bmp = ImageApi.image((args.getOrNull(0) as? Number)?.toInt()) ?: return@function ""
+        guard("__ocr_text") { args ->
+            val bmp = ImageApi.image((args.getOrNull(0) as? Number)?.toInt()) ?: return@guard ""
             OcrApi.recognizeText(bmp, regionOf(args, 1))
         }
-        function("__ocr_find") { args ->
-            val bmp = ImageApi.image((args.getOrNull(0) as? Number)?.toInt()) ?: return@function emptyList<Any>()
-            val text = args.getOrNull(1)?.toString() ?: return@function emptyList<Any>()
+        guard("__ocr_find") { args ->
+            val bmp = ImageApi.image((args.getOrNull(0) as? Number)?.toInt()) ?: return@guard emptyList<Any>()
+            val text = args.getOrNull(1)?.toString() ?: return@guard emptyList<Any>()
             val all = (args.getOrNull(6) as? Number)?.toInt() == 1
             OcrApi.find(bmp, text, regionOf(args, 2), all).map { ocrItem(it) }
         }
 
         // —— adapter 分辨率适配（API 第 6 节）——
-        function("__adapter_set") { args ->
+        guard("__adapter_set") { args ->
             ScriptAdapter.setDesignSize(numArg(args, 0).toInt(), numArg(args, 1).toInt())
             null
         }
-        function("__adapter_reset") { _ ->
+        guard("__adapter_reset") { _ ->
             ScriptAdapter.reset()
             null
         }
-        function("__adapter_enabled") { _ -> ScriptAdapter.enabled() }
-        function("__adapter_scale") { args ->
+        guard("__adapter_enabled") { _ -> ScriptAdapter.enabled() }
+        guard("__adapter_scale") { args ->
             listOf(
                 ScriptAdapter.toRealX(numArg(args, 0).toFloat()).toLong(),
                 ScriptAdapter.toRealY(numArg(args, 1).toFloat()).toLong()
@@ -347,9 +358,9 @@ object ScriptEngine {
 
         // —— 截屏与图像（API 第 3 节；由 PRELUDE 组装成手册形态，这里只收标量参数）——
         val scriptDir = File(env.scriptPath).parentFile ?: File("/")
-        function("__capture_ready") { _ -> env.screenCaptureReady() }
-        function("__request_capture") { _ -> env.requestScreenCapture() }
-        function("__img_capture") { _ ->
+        guard("__capture_ready") { _ -> env.screenCaptureReady() }
+        guard("__request_capture") { _ -> env.requestScreenCapture() }
+        guard("__img_capture") { _ ->
             var bmp = ScreenCapture.capture()
             // 未授权或授权失效（切屏/息屏）：按设计「找图失败自动重新请求」自动再申请一次
             if (bmp == null && !ScreenCapture.isReady() && !session.captureReRequested) {
@@ -370,8 +381,8 @@ object ScriptEngine {
                 ImageApi.storeImage(bmp).toLong()
             }
         }
-        function("__img_read") { args ->
-            val path = args.getOrNull(0)?.toString() ?: return@function -1L
+        guard("__img_read") { args ->
+            val path = args.getOrNull(0)?.toString() ?: return@guard -1L
             val id = ImageApi.read(path, scriptDir)
             if (id == null) {
                 env.onLog('W', "读图失败: $path")
@@ -380,65 +391,65 @@ object ScriptEngine {
                 id.toLong()
             }
         }
-        function("__img_save") { args ->
-            val id = (args.getOrNull(0) as? Number)?.toInt() ?: return@function false
-            val path = args.getOrNull(1)?.toString() ?: return@function false
+        guard("__img_save") { args ->
+            val id = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard false
+            val path = args.getOrNull(1)?.toString() ?: return@guard false
             val format = args.getOrNull(2) as? String
             val quality = (args.getOrNull(3) as? Number)?.toInt() ?: 100
             ImageApi.save(id, path, scriptDir, format, quality)
         }
-        function("__img_clip") { args ->
-            val id = (args.getOrNull(0) as? Number)?.toInt() ?: return@function -1L
+        guard("__img_clip") { args ->
+            val id = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard -1L
             val x = numArg(args, 1).toInt()
             val y = numArg(args, 2).toInt()
             val w = numArg(args, 3).toInt()
             val h = numArg(args, 4).toInt()
             (ImageApi.clip(id, x, y, w, h) ?: -1).toLong()
         }
-        function("__img_pixel") { args ->
-            val id = (args.getOrNull(0) as? Number)?.toInt() ?: return@function -1L
+        guard("__img_pixel") { args ->
+            val id = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard -1L
             val color = ImageApi.pixel(id, numArg(args, 1).toInt(), numArg(args, 2).toInt())
             color?.toLong()?.and(0xFFFFFFFFL) ?: -1L
         }
-        function("__img_width") { args ->
+        guard("__img_width") { args ->
             (ImageApi.width((args.getOrNull(0) as? Number)?.toInt() ?: -1)).toLong()
         }
-        function("__img_height") { args ->
+        guard("__img_height") { args ->
             (ImageApi.height((args.getOrNull(0) as? Number)?.toInt() ?: -1)).toLong()
         }
-        function("__img_release") { args ->
+        guard("__img_release") { args ->
             (args.getOrNull(0) as? Number)?.toInt()?.let { ImageApi.releaseImage(it) }
             null
         }
-        function("__img_find") { args ->
-            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@function null
-            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@function null
-            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@function null
+        guard("__img_find") { args ->
+            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard null
+            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@guard null
+            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@guard null
             val region = regionOf(args, 3)
             ImageApi.findImage(imageId, tplId, threshold, region)?.let { pt(it) }
         }
-        function("__img_find_all") { args ->
-            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@function emptyList<Any>()
-            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@function emptyList<Any>()
-            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@function emptyList<Any>()
+        guard("__img_find_all") { args ->
+            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard emptyList<Any>()
+            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@guard emptyList<Any>()
+            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@guard emptyList<Any>()
             val region = regionOf(args, 3)
             val max = (args.getOrNull(7) as? Number)?.toInt() ?: 5
             ImageApi.findAllImages(imageId, tplId, threshold, region, max).map { pt(it) }
         }
-        function("__img_exists") { args ->
-            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@function false
-            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@function false
-            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@function false
+        guard("__img_exists") { args ->
+            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard false
+            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@guard false
+            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@guard false
             ImageApi.existsImage(imageId, tplId, threshold, regionOf(args, 3))
         }
-        function("__img_find_with_text") { args ->
-            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@function null
-            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@function null
-            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@function null
+        guard("__img_find_with_text") { args ->
+            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard null
+            val tplId = resolveTemplate(args.getOrNull(1), scriptDir) ?: return@guard null
+            val threshold = (args.getOrNull(2) as? Number)?.toDouble() ?: return@guard null
             val region = regionOf(args, 3)
             val padding = (args.getOrNull(7) as? Number)?.toInt() ?: 0
             val m = ImageApi.findImageWithText(imageId, tplId, threshold, region, padding)
-                ?: return@function null
+                ?: return@guard null
             // [x, y, left, top, right, bottom, text, items]，由 JS 侧组装成 Match 对象
             listOf(
                 ScriptAdapter.toDesignX(m.x).toLong(),
@@ -451,17 +462,17 @@ object ScriptEngine {
                 m.items.map { ocrItem(it) }
             )
         }
-        function("__img_find_color") { args ->
-            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@function null
+        guard("__img_find_color") { args ->
+            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard null
             // 色值可能是超过 Int 范围的正数（ARGB），先经 Long 再截断，避免 Double.toInt() 饱和
-            val color = (args.getOrNull(1) as? Number)?.toLong()?.toInt() ?: return@function null
+            val color = (args.getOrNull(1) as? Number)?.toLong()?.toInt() ?: return@guard null
             val threshold = (args.getOrNull(2) as? Number)?.toInt() ?: 16
             ImageApi.findColor(imageId, color, threshold, regionOf(args, 3))?.let { pt(it) }
         }
-        function("__img_find_multi") { args ->
-            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@function null
-            val first = (args.getOrNull(1) as? Number)?.toInt() ?: return@function null
-            val flat = args.getOrNull(2) as? List<*> ?: return@function null
+        guard("__img_find_multi") { args ->
+            val imageId = (args.getOrNull(0) as? Number)?.toInt() ?: return@guard null
+            val first = (args.getOrNull(1) as? Number)?.toInt() ?: return@guard null
+            val flat = args.getOrNull(2) as? List<*> ?: return@guard null
             val threshold = (args.getOrNull(3) as? Number)?.toInt() ?: 16
             val offsets = ArrayList<IntArray>()
             var i = 0
@@ -477,7 +488,7 @@ object ScriptEngine {
         }
 
         // —— 全局常量 ——
-        function("__scriptPath") { _ -> env.scriptPath }
+        guard("__scriptPath") { _ -> env.scriptPath }
     }
 
     /** 取前两个 number 参数为坐标；非法时返回 null */
