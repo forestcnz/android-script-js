@@ -54,7 +54,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
 
     // QuickJS 脚本引擎（quickjs-kt，ES2020+，含各 ABI 原生库）
-    // 1.0.8+ 使用 Kotlin 2.4 编译，超出 AGP 9.0 内置 Kotlin 2.2.0 的元数据读取上限，故锁 1.0.5
+    // 1.0.6/1.0.7 起即为 Kotlin 2.4 元数据编译，超出 AGP 9.0 内置 Kotlin 的读取上限，故锁 1.0.5。
+    // 当前版本无 VM 级中断，停止检查由 ScriptEngine.defineGlobals 的 guard 处理。
     implementation("io.github.dokar3:quickjs-kt:1.0.5")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 

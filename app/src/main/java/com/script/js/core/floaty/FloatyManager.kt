@@ -23,9 +23,13 @@ import android.widget.TextView
  *
  * 控件有状态，就地变形而不是叠加多个窗口：
  * - 空闲态：胶囊「JS」，点击展开面板，拖动可移动并自动贴边（位置会记住）；
- * - 运行态：同一胶囊变成「▶ 任务名  ■ 停止」，点击停止中断脚本。
+ * - 运行态：变成圆形停止按钮（不显示任务名），可拖动，长按 3 秒停止任务（按钮显示倒计时）。
  *
- * 展开的面板按「任务 / 工具」分区：任务列表可滚动，工具区提供坐标拾取、取色器、悬浮日志。
+ * 贴边后空闲球半隐藏：约一半探出屏外，点击先弹出完整显示，再次点击才展开面板；
+ * 运行态胶囊完整贴边（停止键保持可见）。半隐藏位置会持久化，重启后保持贴边形态。
+ *
+ * 展开的面板按「任务 / 工具」分区：任务列表可滚动，工具区提供坐标拾取、取色器、悬浮日志，
+ * 底部提供「关闭悬浮窗」入口（关闭后可在 App「工具」页重新开启）。
  * 对应设计 docs/DESIGN.md 第 4.4 节「悬浮与调试工具」。
  */
 object FloatyManager {
@@ -40,6 +44,21 @@ object FloatyManager {
 
     /** 是否已自动引导过悬浮窗授权（只自动跳一次，避免每次启动都抢屏） */
     private const val KEY_ASKED_OVERLAY = "asked_overlay"
+
+    /** 松手贴边后留在屏内的边距（未半隐藏时） */
+    private const val SNAP_MARGIN_DP = 6
+
+    /** 空闲球尺寸（dp），与 ballView 保持一致 */
+    private const val BALL_SIZE_DP = 52
+
+    /** 贴边半隐藏：探出屏外的部分占球宽的比例（剩余半圆留在屏内，可点击弹出） */
+    private const val PEEK_HIDDEN_RATIO = 0.5f
+
+    /** 运行态长按停止任务的按压时长（ms） */
+    private const val LONG_PRESS_STOP_MS = 3000L
+
+    /** 停止按钮文案视图的 tag（长按倒计时更新用） */
+    private const val TAG_STOP_LABEL = "stop_label"
 
     // 配色（悬浮窗自成体系，不跟随 App 主题，保证在任何应用之上都可读）
     private const val COLOR_BG = 0xF21F1F27.toInt()
@@ -82,6 +101,12 @@ object FloatyManager {
     /** 展开的任务/工具面板 */
     private var panelView: View? = null
 
+    /** 贴边方向：目前只做左右贴边 */
+    private enum class DockSide { NONE, LEFT, RIGHT }
+
+    /** 当前贴边形态（LEFT/RIGHT = 半隐藏在屏幕边缘，NONE = 完整显示） */
+    private var dockedSide = DockSide.NONE
+
     /** 当前运行中的任务名（null = 空闲态） */
     @Volatile
     private var runningTask: String? = null
@@ -97,6 +122,10 @@ object FloatyManager {
     /** 任务列表提供者（由宿主注入，避免 core 层循环依赖） */
     @Volatile
     var taskProvider: (() -> List<String>)? = null
+
+    /** 面板点击「关闭悬浮窗」的回调（宿主绑定，用于同步运行状态与开关 UI） */
+    @Volatile
+    var onLauncherClose: (() -> Unit)? = null
 
     /** 是否已授予悬浮窗权限 */
     fun hasOverlayPermission(context: Context): Boolean =
@@ -129,7 +158,8 @@ object FloatyManager {
     }
 
     /** 悬浮控件是否显示中 */
-    fun isLauncherShowing(): Boolean = capsuleView?.isAttachedToWindow == true
+    fun isLauncherShowing(): Boolean = capsuleView?.isAttachedToWindow == true ||
+        panelView?.isAttachedToWindow == true
 
     /**
      * 屏幕尺寸/方向变化（旋转、分屏、分辨率切换）后调用：
@@ -142,7 +172,12 @@ object FloatyManager {
         val m = context.resources.displayMetrics
         val w = view.width.takeIf { it > 0 } ?: (52 * m.density).toInt()
         val h = view.height.takeIf { it > 0 } ?: (52 * m.density).toInt()
-        params.x = params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        params.x = if (dockedSide == DockSide.NONE) {
+            params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        } else {
+            // 半隐藏贴边态：按新屏幕宽度重新对齐探出屏外的部分
+            peekedX(stagedViewW(context, view), m.widthPixels, dockedSide)
+        }
         params.y = params.y.coerceIn(0, (m.heightPixels - h).coerceAtLeast(0))
         hideTaskPanel()
         try {
@@ -172,7 +207,8 @@ object FloatyManager {
             if (keepAlive) FloatyForegroundService.stop(context)
             return false
         }
-        if (capsuleView?.isAttachedToWindow == true) {
+        // 展开面板时球会暂时移除，面板仍在就代表悬浮控件正常显示。
+        if (isLauncherShowing()) {
             if (keepAlive) FloatyForegroundService.start(context)
             return true
         }
@@ -198,18 +234,28 @@ object FloatyManager {
             loadPosition(context, KEY_X, defaultX),
             loadPosition(context, KEY_Y, defaultY)
         )
+        // 历史位置若为半隐藏贴边（越过屏幕边界），按原贴边形态恢复
+        val ballW = (BALL_SIZE_DP * density).toInt()
+        dockedSide = dockSideOf(posX, metrics.widthPixels, ballW)
+        if (dockedSide != DockSide.NONE) {
+            Log.i(TAG, "恢复半隐藏贴边悬浮球: $dockedSide")
+        }
         val params = overlayParams(
             Gravity.TOP or Gravity.START,
             x = posX,
             y = posY
         )
 
-        // 拖动移动；未拖动视为点击 → 展开/收起面板；松手后贴边
+        // 拖动移动；未拖动（点按）统一在此处理：
+        // - 空闲态：半隐藏先弹出，再点展开/收起面板；
+        // - 运行态：按住不动满 3 秒停止任务（按钮显示 3→2→1 倒计时），松手提前只给提示。
+        // 全部走触摸监听（不依赖内部按钮 onClick），拖动不会误触发、判定稳定。
         var downX = 0f
         var downY = 0f
         var startX = 0
         var startY = 0
         var moved = false
+        var wasRunningOnDown = false
         capsule.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -218,12 +264,16 @@ object FloatyManager {
                     startX = params.x
                     startY = params.y
                     moved = false
-                    false
+                    wasRunningOnDown = runningTask != null
+                    // 运行态：按下即开始长按停止计时（拖动会自动取消）
+                    if (runningTask != null) beginLongPressStop()
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
                     if (moved || dx * dx + dy * dy > 25) {
+                        if (!moved) cancelLongPressStop() // 开始拖动：取消长按倒计时
                         moved = true
                         hideTaskPanel()
                         params.x = startX + dx
@@ -233,13 +283,28 @@ object FloatyManager {
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    if (moved) {
-                        snapToEdge(context, wm, capsule, params)
-                        savePosition(context, params.x, params.y)
-                    } else {
-                        toggleTaskPanel(context, wm, params)
+                    cancelLongPressStop()
+                    when {
+                        moved -> snapToEdge(context, wm, capsule, params)
+                        // 半隐藏贴边第一次点击：先完整弹出，下一次点击才展开面板
+                        popOutIfDocked(context, wm, capsule, params) -> Unit
+                        // 长按满 3 秒已触发停止（任务已结束）：松手不做任何事
+                        wasRunningOnDown && runningTask == null -> Unit
+                        runningTask != null -> {
+                            // 未按满 3 秒：提示正确停止方式
+                            Log.i(TAG, "悬浮控件停止按钮点按（长按 3 秒可停止任务）")
+                            android.widget.Toast.makeText(
+                                context, "长按 3 秒停止任务", android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        else -> toggleTaskPanel(context, wm)
                     }
-                    false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    cancelLongPressStop()
+                    moved = false
+                    true
                 }
                 else -> false
             }
@@ -260,9 +325,10 @@ object FloatyManager {
         }
     }
 
-    /** 隐藏悬浮控件（含面板） */
+    /** 隐藏悬浮控件（含面板；面板收起时不恢复球，因为整体都要隐藏） */
     fun hideLauncher(context: Context? = null, stopKeepAlive: Boolean = true) {
-        hideTaskPanel()
+        cancelLongPressStop()
+        hideTaskPanel(restoreBall = false)
         capsuleView?.let {
             try {
                 windowManager?.removeView(it)
@@ -272,13 +338,14 @@ object FloatyManager {
         capsuleView = null
         capsuleParams = null
         windowManager = null
+        dockedSide = DockSide.NONE   // 下次显示时按持久化位置重新推断贴边形态
         if (stopKeepAlive) {
             (context?.applicationContext ?: appContext)?.let { FloatyForegroundService.stop(it) }
         }
         Log.i(TAG, "悬浮控件已隐藏")
     }
 
-    /** 切换到运行态：胶囊就地变成「● 任务名 计时 ■」 */
+    /** 切换到运行态：悬浮控件就地变成圆形停止按钮（长按 3 秒停止） */
     fun setRunning(context: Context, taskName: String) {
         val wasIdle = runningTask == null
         runningTask = taskName
@@ -290,6 +357,8 @@ object FloatyManager {
                 return
             }
         }
+        // 半隐藏贴边球就地变成圆形停止按钮：不再探出屏外（避免挡住停止按钮）
+        dockedSide = DockSide.NONE
         renderCapsule(context)
         startTicker(context)
         Log.i(TAG, "悬浮控件进入运行态: $taskName")
@@ -298,6 +367,7 @@ object FloatyManager {
     /** 回到空闲态（任务结束/停止后调用） */
     fun clearRunning(context: Context) {
         runningTask = null
+        cancelLongPressStop()
         stopTicker()
         renderCapsule(context)
         // 胶囊收缩回圆球后贴回最近的边缘：避免停在屏幕中间（胶囊从边缘向内展开后的残留位置）
@@ -306,7 +376,6 @@ object FloatyManager {
                 capsuleParams?.let { p ->
                     v.post {
                         snapToEdge(context, wm, v, p)
-                        savePosition(context, p.x, p.y)
                     }
                 }
             }
@@ -317,7 +386,7 @@ object FloatyManager {
     /**
      * 按当前状态重建胶囊内容：
      * - 空闲：52dp 圆球「JS」+ 右下角状态点（绿=就绪），半透明避免遮挡；
-     * - 运行：圆角胶囊 = 状态点 + 「▶ 任务名」+ 计时(mm:ss) + 红色停止键。
+     * - 运行：一个圆形停止按钮（不显示任务名），长按 3 秒停止任务。
      */
     @SuppressLint("SetTextI18n")
     private fun renderCapsule(context: Context) {
@@ -331,23 +400,10 @@ object FloatyManager {
             capsule.alpha = 0.92f
             capsule.addView(ballView(context))
         } else {
-            capsule.setPadding(
-                (7 * d).toInt(), (6 * d).toInt(), (6 * d).toInt(), (6 * d).toInt()
-            )
-            capsule.background = roundedBackground(COLOR_BG, 26 * d, 1 * d, 0x22FFFFFF)
+            // 运行态：整个悬浮控件就是一个圆形停止按钮（任务名等细节看运行日志/通知栏）
+            capsule.setPadding(0, 0, 0, 0)
+            capsule.background = null
             capsule.alpha = 1f
-            capsule.addView(statusDot(context))
-            capsule.addView(
-                textView(context, "▶ ${ellipsize(task, 8)}", 13f, COLOR_TEXT).apply {
-                    maxLines = 1
-                    setPadding((8 * d).toInt(), 0, (10 * d).toInt(), 0)
-                }
-            )
-            timerView = textView(context, elapsedText(), 11f, COLOR_TEXT_DIM).apply {
-                typeface = android.graphics.Typeface.MONOSPACE
-                setPadding(0, 0, (10 * d).toInt(), 0)
-            }
-            capsule.addView(timerView)
             capsule.addView(stopButton(context))
         }
         capsuleView?.let { view ->
@@ -368,7 +424,13 @@ object FloatyManager {
         val w = view.width.takeIf { it > 0 } ?: return
         val h = view.height.takeIf { it > 0 } ?: return
         val m = context.resources.displayMetrics
-        val nx = params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        val nx = when (dockedSide) {
+            DockSide.LEFT, DockSide.RIGHT ->
+                // 半隐藏贴边态：按当前宽度重新对齐屏外隐藏量（球↔胶囊宽度变化后仍保持贴边形态）
+                peekedX(stagedViewW(context, view), m.widthPixels, dockedSide)
+            DockSide.NONE ->
+                params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
+        }
         val ny = params.y.coerceIn(0, (m.heightPixels - h).coerceAtLeast(0))
         if (nx != params.x || ny != params.y) {
             params.x = nx
@@ -378,6 +440,13 @@ object FloatyManager {
             } catch (_: Exception) {
             }
         }
+    }
+
+    /** 参与贴边计算的悬浮控件宽度：空闲用固定球宽（状态切换瞬间测量值可能是旧胶囊宽度） */
+    private fun stagedViewW(context: Context, view: View): Int {
+        val density = context.resources.displayMetrics.density
+        if (runningTask == null) return (BALL_SIZE_DP * density).toInt()
+        return view.width.takeIf { it > 0 } ?: (60 * density).toInt()
     }
 
     /** 空闲态：圆形球 + 状态点 */
@@ -420,17 +489,55 @@ object FloatyManager {
         }
     }
 
-    /** 运行态停止键：红色圆角方块，点击中断脚本 */
+    /**
+     * 运行态停止按钮：红底白色方块（尺寸与空闲球一致）。
+     * 长按 3 秒停止的手势由悬浮控件触摸监听处理，这里只负责外观；
+     * 文案视图带 [TAG_STOP_LABEL] 标记，长按倒计时（3→2→1）由 [beginLongPressStop] 更新。
+     */
     private fun stopButton(context: Context): View {
         val d = context.resources.displayMetrics.density
-        return textView(context, "■ 停止", 12f, 0xFFFFFFFF.toInt()).apply {
-            background = roundedBackground(COLOR_STOP, 8 * d, 0f, 0)
-            setPadding((10 * d).toInt(), (6 * d).toInt(), (10 * d).toInt(), (6 * d).toInt())
-            isClickable = true
-            setOnClickListener {
-                Log.i(TAG, "悬浮控件停止按钮点击, 回调已绑定=${onStopClicked != null}")
-                onStopClicked?.invoke()
-            }
+        val size = (BALL_SIZE_DP * d).toInt()
+        return textView(context, "■", 18f, 0xFFFFFFFF.toInt()).apply {
+            gravity = Gravity.CENTER
+            background = roundedBackground(COLOR_STOP, 26 * d, 1.5f * d, 0x66FFFFFF)
+            tag = TAG_STOP_LABEL
+        }.also { view ->
+            view.layoutParams = LinearLayout.LayoutParams(size, size)
+        }
+    }
+
+    /** 长按停止的待执行回调（用于取消） */
+    private val longPressRunnables = mutableListOf<Runnable>()
+
+    /**
+     * 运行态长按 [LONG_PRESS_STOP_MS] 停止任务：按住期间按钮显示 3→2→1 倒计时。
+     * 在 ACTION_DOWN 时调用；拖动/提前松手/任务结束时用 [cancelLongPressStop] 取消。
+     */
+    private fun beginLongPressStop() {
+        cancelLongPressStop()
+        if (runningTask == null) return
+        val label = capsuleView?.findViewWithTag<TextView>(TAG_STOP_LABEL) ?: return
+        label.text = "3"
+        longPressRunnables += Runnable { label.text = "2" }
+            .also { handler.postDelayed(it, 1000L) }
+        longPressRunnables += Runnable { label.text = "1" }
+            .also { handler.postDelayed(it, 2000L) }
+        longPressRunnables += Runnable {
+            longPressRunnables.clear()
+            label.text = "■"
+            Log.i(TAG, "悬浮控件长按${LONG_PRESS_STOP_MS / 1000}秒停止, 回调已绑定=${onStopClicked != null}")
+            onStopClicked?.invoke()
+        }.also { handler.postDelayed(it, LONG_PRESS_STOP_MS) }
+    }
+
+    /** 取消未完成的长按停止（拖动/提前松手/任务结束时调用），恢复按钮文案 */
+    private fun cancelLongPressStop() {
+        if (longPressRunnables.isNotEmpty()) {
+            longPressRunnables.forEach { handler.removeCallbacks(it) }
+            longPressRunnables.clear()
+        }
+        if (runningTask != null) {
+            capsuleView?.findViewWithTag<TextView>(TAG_STOP_LABEL)?.text = "■"
         }
     }
 
@@ -441,8 +548,12 @@ object FloatyManager {
 
     private val ticker = object : Runnable {
         override fun run() {
-            timerView?.text = elapsedText()
-            if (runningTask != null) handler.postDelayed(this, 1000L)
+            // 运行态已简化为圆形停止按钮（无计时显示）：没有计时视图时不再循环，避免每秒空转
+            val tv = timerView
+            if (tv != null) {
+                tv.text = elapsedText()
+                if (runningTask != null) handler.postDelayed(this, 1000L)
+            }
         }
     }
 
@@ -487,35 +598,109 @@ object FloatyManager {
     private fun ellipsize(name: String, max: Int): String =
         if (name.length <= max) name else name.take(max) + "…"
 
+    /**
+     * 真实屏幕尺寸（宽、高）。
+     * displayMetrics.heightPixels 在部分 ROM/模拟器（如实测 MuMu 报 2064，实际 1920）会虚报，
+     * 涉及居中/贴边/钳位的计算统一用真实显示尺寸，避免面板「看起来不居中」。
+     */
+    private fun realScreenSize(context: Context): android.graphics.Point {
+        val wmSvc = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = wmSvc.maximumWindowMetrics.bounds
+            return android.graphics.Point(bounds.width(), bounds.height())
+        }
+        @Suppress("DEPRECATION")
+        val point = android.graphics.Point()
+        @Suppress("DEPRECATION")
+        wmSvc.defaultDisplay.getRealSize(point)
+        return point
+    }
 
-    /** 松手后贴到最近的左/右边缘 */
+
+    /**
+     * 松手后贴到最近的左/右边缘：
+     * - 空闲球：半隐藏，约一半探出屏外（peek），点击可完整弹出；
+     * - 运行态胶囊：完整贴边并留边距（停止键必须保持可见）。
+     */
     private fun snapToEdge(
         context: Context,
         wm: WindowManager,
         view: View,
         params: WindowManager.LayoutParams
     ) {
-        val screenW = context.resources.displayMetrics.widthPixels
-        val viewW = view.width.takeIf { it > 0 } ?: (60 * context.resources.displayMetrics.density).toInt()
-        val margin = (6 * context.resources.displayMetrics.density).toInt()
-        params.x = if (params.x + viewW / 2 < screenW / 2) margin else screenW - viewW - margin
+        val m = context.resources.displayMetrics
+        val screenW = m.widthPixels
+        val viewW = stagedViewW(context, view)
+        val side = if (params.x + viewW / 2 < screenW / 2) DockSide.LEFT else DockSide.RIGHT
+        params.x = if (runningTask == null) {
+            peekedX(viewW, screenW, side)
+        } else {
+            val margin = (SNAP_MARGIN_DP * m.density).toInt()
+            if (side == DockSide.LEFT) margin else screenW - viewW - margin
+        }
+        // 垂直钳位：拖动松手后保证整个控件留在真实屏幕内（用真实高度，displayMetrics 可能虚报）
+        val viewH = view.height.takeIf { it > 0 } ?: (BALL_SIZE_DP * m.density).toInt()
+        params.y = params.y.coerceIn(0, (realScreenSize(context).y - viewH).coerceAtLeast(0))
+        dockedSide = if (runningTask == null) side else DockSide.NONE
         try {
             wm.updateViewLayout(view, params)
         } catch (_: Exception) {
         }
+        savePosition(context, params.x, params.y)
+        Log.i(TAG, "悬浮控件贴边: $side${if (runningTask == null) "（半隐藏）" else "（完整）"}")
+    }
+
+    /** 半隐藏贴边的 x：屏内只留一条半圆弧，方向为 [side] */
+    private fun peekedX(viewW: Int, screenW: Int, side: DockSide): Int {
+        val hidden = (viewW * PEEK_HIDDEN_RATIO).toInt().coerceAtLeast(1)
+        return when (side) {
+            DockSide.LEFT -> -hidden
+            DockSide.RIGHT -> screenW - viewW + hidden
+            DockSide.NONE -> 0
+        }
+    }
+
+    /**
+     * 半隐藏态第一次点击：把球从屏幕边缘完整弹出（不展开面板，下一次点击才展开）。
+     * @return 是否执行了弹出（false = 本就完整可见）
+     */
+    private fun popOutIfDocked(
+        context: Context,
+        wm: WindowManager,
+        view: View,
+        params: WindowManager.LayoutParams
+    ): Boolean {
+        val side = dockedSide
+        if (side == DockSide.NONE) return false
+        dockedSide = DockSide.NONE
+        val m = context.resources.displayMetrics
+        val margin = (SNAP_MARGIN_DP * m.density).toInt()
+        val viewW = view.width.takeIf { it > 0 } ?: (BALL_SIZE_DP * m.density).toInt()
+        params.x = if (side == DockSide.LEFT) margin else m.widthPixels - viewW - margin
+        try {
+            wm.updateViewLayout(view, params)
+        } catch (_: Exception) {
+        }
+        savePosition(context, params.x, params.y)
+        Log.i(TAG, "半隐藏悬浮球已弹出完整显示")
+        return true
+    }
+
+    /** 根据持久化坐标推断贴边状态（负 x = 左贴边，越过右边界 = 右贴边） */
+    private fun dockSideOf(x: Int, screenW: Int, viewW: Int): DockSide = when {
+        x < 0 -> DockSide.LEFT
+        x > screenW - viewW -> DockSide.RIGHT
+        else -> DockSide.NONE
     }
 
     private fun loadPosition(context: Context, key: String, default: Int): Int =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt(key, default)
 
     /**
-     * 位置越界钳位：旋转屏幕/切换分辨率后，历史绝对坐标可能落到屏幕外，
-     * 此时回落到默认位置，避免悬浮球「消失」。
-     */
-    /**
      * 位置钳位：旋转屏幕/切换分辨率后历史绝对坐标可能落到屏幕外。
-     * 处理原则是**收紧到屏幕内**（而不是丢弃位置回默认）——用户把球拖到右边缘属于正常位置，
-     * 早期实现按 120dp 余量判定「越界」并复位，导致贴边位置重启后丢失。
+     * - 屏内位置：y 越界时收紧到屏内（早期按 120dp 余量判定「越界」并复位是 bug，已修）；
+     * - 越过左右边界的 x 属于用户留下的半隐藏贴边位置（负 x=左贴边，越过右界=右贴边），
+     *   归一到标准探出量而不是收回屏内，重启后仍保持贴边半隐藏形态。
      */
     private fun clampToScreen(
         context: Context,
@@ -523,15 +708,22 @@ object FloatyManager {
         y: Int
     ): Pair<Int, Int> {
         val m = context.resources.displayMetrics
-        val viewW = capsuleView?.width?.takeIf { it > 0 } ?: (56 * m.density).toInt()
-        val viewH = capsuleView?.height?.takeIf { it > 0 } ?: (56 * m.density).toInt()
+        val viewW = (BALL_SIZE_DP * m.density).toInt()
         val maxX = (m.widthPixels - viewW).coerceAtLeast(0)
-        val maxY = (m.heightPixels - viewH).coerceAtLeast(0)
-        if (x < 0 || y < 0 || x > maxX || y > maxY) {
-            val nx = x.coerceIn(0, maxX)
-            val ny = y.coerceIn(0, maxY)
-            Log.i(TAG, "悬浮控件位置越界(x=$x,y=$y)，收紧为($nx,$ny)")
-            return nx to ny
+        val maxY = (m.heightPixels - viewW).coerceAtLeast(0)
+        if (x < 0) {
+            val nx = peekedX(viewW, m.widthPixels, DockSide.LEFT)
+            Log.i(TAG, "悬浮控件位置(x=$x,y=$y)：恢复左贴边半隐藏($nx,$y)")
+            return nx to y.coerceIn(0, maxY)
+        }
+        if (x > maxX) {
+            val nx = peekedX(viewW, m.widthPixels, DockSide.RIGHT)
+            Log.i(TAG, "悬浮控件位置(x=$x,y=$y)：恢复右贴边半隐藏($nx,$y)")
+            return nx to y.coerceIn(0, maxY)
+        }
+        if (y < 0 || y > maxY) {
+            Log.i(TAG, "悬浮控件位置越界(x=$x,y=$y)，y 收紧为(${y.coerceIn(0, maxY)})")
+            return x to y.coerceIn(0, maxY)
         }
         return x to y
     }
@@ -545,13 +737,15 @@ object FloatyManager {
 
     /**
      * 展开/收起面板（每次展开重新读取任务列表与运行状态）。
-     * 布局：卡片式，自上而下 = 头部（选择任务 + 关闭） / 任务列表（可滚动） / 工具按钮行 /
-     * 运行中任务显示「■ 停止当前任务」。宽度固定 268dp，贴悬浮球同侧并做屏幕内钳位。
+     * 布局：卡片式，自上而下 = 头部（选择任务 + 关闭） / 任务列表（双列紧凑格子，可滚动） /
+     * 工具图标行（4 个均分图标按钮） / 运行中任务显示「■ 停止当前任务」 / 底部「✕ 关闭悬浮窗」。
+     * 宽度不超过 284dp，按内容高度在屏幕正中显示。
+     * 面板展开期间悬浮球暂时隐藏（避免遮挡），收起面板时自动恢复。
+     * 按住面板标题栏（「≡ 选择任务」区域）可整体拖动面板，✕ 按钮与列表滚动不受影响。
      */
     private fun toggleTaskPanel(
         context: Context,
-        wm: WindowManager,
-        capsule: WindowManager.LayoutParams
+        wm: WindowManager
     ) {
         if (panelView != null) {
             hideTaskPanel()
@@ -567,14 +761,14 @@ object FloatyManager {
             setPadding(0, (6 * d).toInt(), 0, (6 * d).toInt())
         }
 
-        // —— 头部：标题 + 任务数 + 关闭 ——
+        // —— 头部：拖动把手 + 标题 + 任务数 + 关闭（按住头部可整体拖动面板） ——
         val header = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding((14 * d).toInt(), (6 * d).toInt(), (8 * d).toInt(), (6 * d).toInt())
         }
         header.addView(
-            textView(context, "选择任务", 13f, COLOR_TEXT).apply {
+            textView(context, "选择任务", 15f, COLOR_TEXT).apply {
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
             },
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -591,61 +785,85 @@ object FloatyManager {
         panel.addView(header)
         panel.addView(divider(context))
 
-        // —— 任务列表（可滚动，最长 42% 屏高） ——
-        val list = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
+        // —— 任务列表（双列紧凑格子，可滚动，最长 42% 屏高） ——
+        val list = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding((8 * d).toInt(), (8 * d).toInt(), (4 * d).toInt(), (4 * d).toInt())
+        }
         if (tasks.isEmpty()) {
             list.addView(menuText(context, "（暂无任务，先在 App 里新建）") { })
         } else {
-            tasks.forEach { name ->
-                val isRunning = runningTask == name
-                list.addView(
-                    taskRow(context, name, isRunning) {
-                        if (runningTask == null) {
-                            Log.i(TAG, "悬浮球选择任务: $name")
-                            hideTaskPanel()
-                            onTaskSelected?.invoke(name)
+            // 每行两个任务格子（左右分布），任务多时高度减半、面板更紧凑
+            tasks.chunked(2).forEach { pair ->
+                val gridRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                pair.forEach { name ->
+                    val isRunning = runningTask == name
+                    gridRow.addView(
+                        taskCell(context, name, isRunning) {
+                            if (runningTask == null) {
+                                Log.i(TAG, "悬浮球选择任务: $name")
+                                hideTaskPanel()
+                                onTaskSelected?.invoke(name)
+                            }
+                        },
+                        LinearLayout.LayoutParams(0, (44 * d).toInt(), 1f).apply {
+                            marginEnd = (4 * d).toInt()
+                            bottomMargin = (4 * d).toInt()
                         }
-                    }
-                )
+                    )
+                }
+                // 单数任务补空占位，保证最后一行格子仍然左对齐等宽
+                if (pair.size == 1) {
+                    gridRow.addView(View(context), LinearLayout.LayoutParams(0, 0, 1f))
+                }
+                list.addView(gridRow)
             }
         }
-        val scroll = ScrollView(context).apply {
-            addView(list)
-            isFillViewport = true
+        val maxListHeight = (realScreenSize(context).y * 0.42f).toInt().coerceAtLeast((48 * d).toInt())
+        val scroll = object : ScrollView(context) {
+            override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+                val parentLimit = View.MeasureSpec.getSize(heightMeasureSpec)
+                val limit = if (View.MeasureSpec.getMode(heightMeasureSpec) == View.MeasureSpec.UNSPECIFIED)
+                    maxListHeight else maxListHeight.coerceAtMost(parentLimit)
+                super.onMeasure(widthMeasureSpec, View.MeasureSpec.makeMeasureSpec(limit, View.MeasureSpec.AT_MOST))
+            }
+        }.apply {
+            addView(list, android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            isFillViewport = false
         }
-        val maxListHeight = (context.resources.displayMetrics.heightPixels * 0.42f).toInt()
         panel.addView(
             scroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                (tasks.size * 46 * d).toInt().coerceAtMost(maxListHeight).coerceAtLeast((46 * d).toInt())
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         )
 
-        // —— 底部：工具按钮行（横向紧凑，节省高度） ——
+        // —— 底部：工具图标行（4 个均分图标按钮，无文字） ——
         panel.addView(divider(context))
         val tools = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding((8 * d).toInt(), (6 * d).toInt(), (8 * d).toInt(), (2 * d).toInt())
+            // 左右内边距 8dp 对称（每个按钮 marginEnd 6dp + 行末 padding 2dp）
+            setPadding((8 * d).toInt(), (8 * d).toInt(), (2 * d).toInt(), (6 * d).toInt())
         }
-        tools.addView(toolChip(context, "取坐标") {
+        tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_tool_point, "取坐标") {
             hideTaskPanel()
             PickerOverlay.show(context, PickerOverlay.Mode.POINT)
         })
-        tools.addView(toolChip(context, "取色") {
+        tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_tool_color, "取色") {
             hideTaskPanel()
             PickerOverlay.show(context, PickerOverlay.Mode.COLOR)
         })
-        tools.addView(toolChip(context, "去截图") {
+        tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_tool_shot, "截图") {
             hideTaskPanel()
             PickerOverlay.show(context, PickerOverlay.Mode.SCREENSHOT)
         })
-        tools.addView(toolChip(context, "日志") {
+        tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_tool_log, "日志") {
             hideTaskPanel()
             ConsoleOverlay.toggle(context)
-        })
-        tools.addView(toolChip(context, "贴边") {
-            capsuleView?.let { snapToEdge(context, wm, it, capsule) }
         })
         panel.addView(tools)
 
@@ -675,34 +893,89 @@ object FloatyManager {
             panel.addView(stopRow)
         }
 
-        // —— 定位：贴悬浮球同侧，做屏幕内钳位（不超出右/下边界） ——
-        val screenW = context.resources.displayMetrics.widthPixels
-        val screenH = context.resources.displayMetrics.heightPixels
-        val panelW = (268 * d).toInt()
-        val estH = (220 * d).toInt()
-        val leftSide = capsule.x + capsuleW() / 2 < screenW / 2
-        val panelX = if (leftSide) capsule.x else capsule.x + capsuleW() - panelW
-        val panelY = (capsule.y + capsuleH() + (8 * d).toInt())
-        val params = overlayParams(
-            Gravity.TOP or Gravity.START,
-            x = panelX.coerceIn(0, (screenW - panelW).coerceAtLeast(0)),
-            y = panelY.coerceIn(0, (screenH - estH).coerceAtLeast(0))
+        // —— 底部：关闭悬浮窗（关闭后需回 App「工具」页重新开启） ——
+        panel.addView(divider(context))
+        panel.addView(
+            closeLauncherRow(context),
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         )
+
+        // —— 定位：Gravity.CENTER 系统级居中 ——
+        // 手工算坐标依赖 displayMetrics/WindowMetrics，实测 MuMu 上两者都虚报
+        // （displayMetrics 高 2064 vs 实际 1920，最大窗口度量 1030x2064 vs 实际 1080x1920），
+        // 会导致「看起来不居中」；交由系统按真实显示帧居中最稳，也不再需要布局监听校正。
+        // 注意：CENTER 重力下 params.x/y 是「相对屏幕中心的偏移量」，头部拖动直接累加偏移。
+        val panelW = (284 * d).toInt().coerceAtMost((context.resources.displayMetrics.widthPixels - 32 * d).toInt()).coerceAtLeast(1)
+        val params = overlayParams(Gravity.CENTER, x = 0, y = 0)
         params.width = panelW
         try {
             wm.addView(panel, params)
             panelView = panel
             windowManager = wm
+            // 面板展开期间隐藏悬浮球（避免遮挡居中的面板，收起面板时自动恢复）
+            hideCapsuleForPanel()
+            // —— 头部拖动：按住标题栏可整体移动面板（✕ 按钮点击不受影响，列表滚动也不冲突） ——
+            var hdDownX = 0f
+            var hdDownY = 0f
+            var hdStartX = 0
+            var hdStartY = 0
+            var hdMoved = false
+            header.setOnTouchListener { _, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        hdDownX = event.rawX
+                        hdDownY = event.rawY
+                        hdStartX = params.x
+                        hdStartY = params.y
+                        hdMoved = false
+                        true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        val dx = (event.rawX - hdDownX).toInt()
+                        val dy = (event.rawY - hdDownY).toInt()
+                        if (hdMoved || dx * dx + dy * dy > 25) {
+                            hdMoved = true
+                            params.x = hdStartX + dx
+                            params.y = hdStartY + dy
+                            try {
+                                wm.updateViewLayout(panel, params)
+                            } catch (_: Exception) {
+                            }
+                        }
+                        true
+                    }
+                    MotionEvent.ACTION_UP -> {
+                        if (hdMoved) {
+                            // 拖动结束：限制「相对中心」的偏移量，保证标题栏不被拖出屏幕（否则面板收不回、球也隐藏着）
+                            // realScreenSize 在个别 ROM 上有偏差，这里只做宽松钳位，不影响居中本身
+                            val real = realScreenSize(context)
+                            val pw = panel.width.takeIf { it > 0 } ?: panelW
+                            val ph = panel.height.takeIf { it > 0 } ?: 0
+                            val maxOffX = ((real.x - pw) / 2).coerceAtLeast(0)
+                            val maxOffY = ((real.y - ph) / 2).coerceAtLeast(0)
+                            params.x = params.x.coerceIn(-maxOffX, maxOffX)
+                            params.y = params.y.coerceIn(-maxOffY, maxOffY)
+                            try {
+                                wm.updateViewLayout(panel, params)
+                            } catch (_: Exception) {
+                            }
+                        }
+                        hdMoved
+                    }
+                    MotionEvent.ACTION_CANCEL -> {
+                        hdMoved = false
+                        true
+                    }
+                    else -> false
+                }
+            }
         } catch (e: Exception) {
             Log.w(TAG, "面板显示失败: ${e.message}")
         }
     }
-
-    private fun capsuleW(): Int = capsuleView?.width?.takeIf { it > 0 }
-        ?: (60 * (capsuleView?.resources?.displayMetrics?.density ?: 3f)).toInt()
-
-    private fun capsuleH(): Int = capsuleView?.height?.takeIf { it > 0 }
-        ?: (52 * (capsuleView?.resources?.displayMetrics?.density ?: 3f)).toInt()
 
     private fun divider(context: Context): View {
         val d = context.resources.displayMetrics.density
@@ -715,62 +988,88 @@ object FloatyManager {
         }
     }
 
-    /** 任务行：左侧 ▶ 强调色 + 任务名 +（运行中）标记；整行 46dp 可点 */
-    private fun taskRow(
+    /**
+     * 任务格子（双列紧凑布局）：左 ▶ 强调色 + 任务名（单行截断）+（运行中）标记。
+     * 单元高度与间距由添加到行时的 LayoutParams 统一设置。
+     */
+    private fun taskCell(
         context: Context,
         name: String,
         running: Boolean,
         onClick: () -> Unit
     ): View {
         val d = context.resources.displayMetrics.density
-        val row = LinearLayout(context).apply {
+        val cell = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding((14 * d).toInt(), 0, (10 * d).toInt(), 0)
+            background = roundedBackground(0x1FFFFFFF, 10 * d, 1 * d, 0x22FFFFFF)
+            setPadding((10 * d).toInt(), 0, (6 * d).toInt(), 0)
             isClickable = true
             setOnClickListener { onClick() }
             if (!running && runningTask != null) alpha = 0.45f
         }
-        row.addView(textView(context, "▶", 11f, COLOR_ACCENT))
-        row.addView(
-            textView(context, name, 14f, if (running) COLOR_RUNNING else COLOR_TEXT).apply {
+        cell.addView(textView(context, "▶", 10f, COLOR_ACCENT))
+        cell.addView(
+            textView(context, name, 13f, if (running) COLOR_RUNNING else COLOR_TEXT).apply {
                 maxLines = 1
-                setPadding((10 * d).toInt(), 0, (8 * d).toInt(), 0)
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding((7 * d).toInt(), 0, (4 * d).toInt(), 0)
             },
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
         if (running) {
-            row.addView(
-                textView(context, "运行中", 10f, COLOR_RUNNING).apply {
-                    background = roundedBackground(0x224CD964, 8 * d, 1 * d, 0x554CD964)
-                    setPadding((8 * d).toInt(), (2 * d).toInt(), (8 * d).toInt(), (2 * d).toInt())
+            cell.addView(
+                textView(context, "运行中", 9f, COLOR_RUNNING).apply {
+                    background = roundedBackground(0x22FFFFFF, 7 * d, 1 * d, 0x55FFFFFF)
+                    setPadding((6 * d).toInt(), (2 * d).toInt(), (6 * d).toInt(), (2 * d).toInt())
                 }
             )
         }
-        row.layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, (46 * d).toInt()
-        )
-        return row
+        return cell
     }
 
-    /** 工具按钮：浅底圆角小胶囊 */
-    private fun toolChip(context: Context, label: String, onClick: () -> Unit): View {
+    /** 紧凑工具按钮：仅显示图标，保留无障碍描述。 */
+    private fun toolIconButton(context: Context, iconRes: Int, desc: String, onClick: () -> Unit): View {
         val d = context.resources.displayMetrics.density
-        return textView(context, label, 12f, COLOR_TEXT).apply {
-            background = roundedBackground(0x1FFFFFFF, 16 * d, 1 * d, 0x22FFFFFF)
-            gravity = Gravity.CENTER
-            setPadding((12 * d).toInt(), (7 * d).toInt(), (12 * d).toInt(), (7 * d).toInt())
+        return android.widget.ImageView(context).apply {
+            setImageResource(iconRes)
+            setColorFilter(COLOR_TEXT)
+            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            background = roundedBackground(0x1FFFFFFF, 8 * d, 1 * d, 0x22FFFFFF)
+            setPadding((12 * d).toInt(), (12 * d).toInt(), (12 * d).toInt(), (12 * d).toInt())
+            contentDescription = desc
             isClickable = true
             setOnClickListener { onClick() }
         }.also {
-            it.layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = (6 * d).toInt() }
+            it.layoutParams = LinearLayout.LayoutParams(0, (48 * d).toInt(), 1f).apply {
+                marginEnd = (6 * d).toInt()
+            }
         }
     }
 
-    private fun hideTaskPanel() {
+    /** 面板底部「✕ 关闭悬浮窗」整行按钮 */
+    private fun closeLauncherRow(context: Context): View {
+        val d = context.resources.displayMetrics.density
+        return textView(context, "✕ 关闭悬浮窗", 13f, COLOR_TEXT_DIM).apply {
+            gravity = Gravity.CENTER
+            setPadding(0, (10 * d).toInt(), 0, (10 * d).toInt())
+            isClickable = true
+            setOnClickListener {
+                Log.i(TAG, "面板点击关闭悬浮窗，回调已绑定=${onLauncherClose != null}")
+                // 不恢复悬浮球：接下来整体隐藏（hideLauncher 内部也会再收面板）
+                hideTaskPanel(restoreBall = false)
+                onLauncherClose?.invoke() ?: run {
+                    // 宿主未绑定回调（如仅保活服务自启）时退化为直接隐藏并记录用户意愿
+                    appContext?.let { ctx ->
+                        setEnabledByUser(ctx, false)
+                        hideLauncher(ctx)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hideTaskPanel(restoreBall: Boolean = true) {
         panelView?.let {
             try {
                 windowManager?.removeView(it)
@@ -778,6 +1077,31 @@ object FloatyManager {
             }
         }
         panelView = null
+        if (restoreBall) restoreCapsuleIfNeeded()
+    }
+
+    /** 面板展开期间把悬浮球窗口暂时移除（收起面板时由 [restoreCapsuleIfNeeded] 恢复） */
+    private fun hideCapsuleForPanel() {
+        capsuleView?.let { cap ->
+            if (cap.isAttachedToWindow) {
+                try {
+                    windowManager?.removeView(cap)
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    /** 面板收起后恢复悬浮球（沿用隐藏前的位置参数，内容保持原状态） */
+    private fun restoreCapsuleIfNeeded() {
+        val cap = capsuleView ?: return
+        val params = capsuleParams ?: return
+        val wm = windowManager ?: return
+        if (cap.isAttachedToWindow || cap.parent != null) return
+        try {
+            wm.addView(cap, params)
+        } catch (_: Exception) {
+        }
     }
 
     /** 面板中的一行菜单项（空列表提示等） */
@@ -785,7 +1109,7 @@ object FloatyManager {
         val density = context.resources.displayMetrics.density
         return TextView(context).apply {
             text = label
-            setTextColor(0xFFEDEDF2.toInt())
+            setTextColor(COLOR_TEXT)
             textSize = 14f
             setPadding((14 * density).toInt(), (12 * density).toInt(), (14 * density).toInt(), (12 * density).toInt())
             isClickable = true
@@ -804,7 +1128,9 @@ object FloatyManager {
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             windowType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            // NO_LIMITS 允许窗口探出屏幕外：贴边半隐藏的「埋进边缘」部分需要延伸出屏幕边界
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             this.gravity = gravity

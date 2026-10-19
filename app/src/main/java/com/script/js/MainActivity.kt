@@ -21,13 +21,13 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
@@ -47,6 +47,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
@@ -203,6 +207,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        mainTab = savedInstanceState?.getInt("main_tab", 0)?.coerceIn(0, 3) ?: 0
+        showCreateDialog = savedInstanceState?.getBoolean("create_dialog", false) ?: false
         setContent {
             MaterialTheme {
                 MainScreen()
@@ -222,10 +228,14 @@ class MainActivity : ComponentActivity() {
                     overlayGranted = FloatyManager.hasOverlayPermission(this@MainActivity)
                     // 静默通道（Root/Shizuku）可用时无需录屏授权即视为「截屏可用」
                     captureReady = ScreenCapture.isReady() || ScreenCapture.silentAvailableCached()
-                    tasks = TaskManager.listTasks(this@MainActivity)
-                    schedules = ScheduleManager.load(this@MainActivity)
-                        .filter { it.enabled }
-                        .associateBy { it.taskName }
+                    // 文件扫描和定时配置读取放到 IO 线程，避免阻塞滚动和点击。
+                    val snapshot = withContext(Dispatchers.IO) {
+                        TaskManager.listTasks(this@MainActivity) to
+                            ScheduleManager.load(this@MainActivity)
+                                .filter { it.enabled }.associateBy { it.taskName }
+                    }
+                    tasks = snapshot.first
+                    schedules = snapshot.second
                     delay(1000)
                 }
             }
@@ -260,10 +270,16 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putInt("main_tab", mainTab)
+        outState.putBoolean("create_dialog", showCreateDialog)
+        super.onSaveInstanceState(outState)
+    }
+
     /**
      * 悬浮窗「默认开启」：
      * - 已授权：自动显示悬浮球（用户主动隐藏过则尊重其选择，不再自动弹）；
-     * - 未授权：首次自动跳转系统悬浮窗授权页（只引导一次，避免每次启动抢屏），
+     * - 未授权：由权限页或运行/工具操作按需引导，首页保持可操作。
      *   开启后回到界面即自动出现悬浮球。
      */
     private fun autoEnableFloaty() {
@@ -273,11 +289,6 @@ class MainActivity : ComponentActivity() {
         }
         // 权限被撤销时同步收起已失效的浮层，并停止悬浮球保活服务。
         ScriptRunner.ensureLauncher(this)
-        if (FloatyManager.wasOverlayAsked(this)) return
-        FloatyManager.markOverlayAsked(this)
-        ScriptRunner.appendLog("悬浮窗默认开启：已自动打开授权页，开启「显示在其他应用上层」后悬浮球会自动出现", 'I')
-        Toast.makeText(this, "请开启悬浮窗权限，开启后悬浮球自动出现", Toast.LENGTH_LONG).show()
-        FloatyManager.requestOverlayPermission(this)
     }
 
     /** 检查本应用的手势无障碍服务是否已开启 */
@@ -297,6 +308,7 @@ class MainActivity : ComponentActivity() {
         val runState by ScriptRunner.state.collectAsState()
         val logs by ScriptRunner.logs.collectAsState()
         val launcherEnabled by ScriptRunner.launcherEnabled.collectAsState()
+        val pageStates = rememberSaveableStateHolder()
 
         // 任务副标题（描述/目标应用）：任务集合变化时后台读取一次，避免每秒轮询做文件 IO
         LaunchedEffect(tasks) {
@@ -355,11 +367,13 @@ class MainActivity : ComponentActivity() {
                             .widthIn(max = 840.dp)
                             .fillMaxHeight()
                     ) {
-                        when (mainTab) {
-                            0 -> PermissionsTab(runState)
-                            1 -> ToolsTab(launcherEnabled)
-                            2 -> TaskListSection(runState, Modifier.fillMaxSize())
-                            else -> LogsTab(logs)
+                        pageStates.SaveableStateProvider(mainTab) {
+                            when (mainTab) {
+                                0 -> PermissionsTab(runState)
+                                1 -> ToolsTab(launcherEnabled)
+                                2 -> TaskListSection(runState, Modifier.fillMaxSize())
+                                else -> LogsTab(logs)
+                            }
                         }
                     }
                 }
@@ -370,14 +384,15 @@ class MainActivity : ComponentActivity() {
             CreateTaskDialog(
                 onDismiss = { showCreateDialog = false },
                 onConfirm = { name, scaffold ->
-                    showCreateDialog = false
                     val created = TaskManager.createTask(this, name, scaffold)
                     if (created == null) {
                         Toast.makeText(this, "创建失败：名称非法或已存在", Toast.LENGTH_SHORT).show()
                     } else {
+                        showCreateDialog = false
                         Toast.makeText(this, "已创建「" + created.name + "」（" + scaffold.label + "）", Toast.LENGTH_SHORT).show()
                         ScriptRunner.appendLog("已创建任务: " + created.name + "（脚手架：" + scaffold.label + "）")
                         tasks = TaskManager.listTasks(this)
+                        editTask(created.name)
                     }
                 }
             )
@@ -389,14 +404,7 @@ class MainActivity : ComponentActivity() {
                 onDismiss = { menuTask = null },
                 onEditScript = {
                     menuTask = null
-                    // 带上上次运行的出错行，打开编辑器即定位/高亮
-                    val err = ScriptRunner.lastError.value?.takeIf { it.taskName == name }
-                    startActivity(
-                        Intent(this, ScriptEditorActivity::class.java)
-                            .putExtra(ScriptEditorActivity.EXTRA_TASK, name)
-                            .putExtra(ScriptEditorActivity.EXTRA_ERROR_LINE, err?.line ?: 0)
-                            .putExtra(ScriptEditorActivity.EXTRA_ERROR_MSG, err?.message)
-                    )
+                    editTask(name)
                 },
                 onCaptureTemplate = {
                     menuTask = null
@@ -617,6 +625,9 @@ class MainActivity : ComponentActivity() {
                         Text("运行")
                     }
                 }
+                TextButton(onClick = { editTask(task.name) }, enabled = !runState.running) {
+                    Text("编辑")
+                }
                 // 固定 40dp 触控区：既保证可点面积，也避免图标贴边被卡片裁切
                 Box(
                     modifier = Modifier
@@ -654,7 +665,7 @@ class MainActivity : ComponentActivity() {
             onDismissRequest = onDismiss,
             title = { Text(taskName) },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     TextButton(onClick = onEditScript) { Text("编辑脚本（task.js）") }
                     TextButton(onClick = onSchedule) {
                         Text(
@@ -1163,7 +1174,8 @@ class MainActivity : ComponentActivity() {
     /** Tab 1：权限状态 —— 三项能力 + 当前运行状态 */
     @Composable
     private fun PermissionsTab(runState: ScriptRunner.RunState) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
             PermissionCard(compact = false)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(bottom = 6.dp)) {
@@ -1176,7 +1188,7 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                runState.taskName ?: "当前无任务运行",
+                                if (runState.running) runState.taskName ?: "任务执行中" else "当前无任务运行",
                                 style = MaterialTheme.typography.bodyLarge
                             )
                             Text(
@@ -1197,7 +1209,8 @@ class MainActivity : ComponentActivity() {
     /** Tab 2：工具 —— 取坐标/取色/悬浮日志/悬浮球 + 截屏通道入口 */
     @Composable
     private fun ToolsTab(launcherEnabled: Boolean) {
-        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
             ToolsCard(launcherEnabled, compact = false)
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(bottom = 6.dp)) {
@@ -1241,6 +1254,17 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /** 新建与列表编辑共用入口，同时保留上次运行错误定位。 */
+    private fun editTask(name: String) {
+        val err = ScriptRunner.lastError.value?.takeIf { it.taskName == name }
+        startActivity(
+            Intent(this, ScriptEditorActivity::class.java)
+                .putExtra(ScriptEditorActivity.EXTRA_TASK, name)
+                .putExtra(ScriptEditorActivity.EXTRA_ERROR_LINE, err?.line ?: 0)
+                .putExtra(ScriptEditorActivity.EXTRA_ERROR_MSG, err?.message)
+        )
     }
 
     private fun runTask(name: String) {
@@ -1562,26 +1586,42 @@ class MainActivity : ComponentActivity() {
             .height(200.dp)
     ) {
         val listState = rememberLazyListState()
-        LaunchedEffect(logs.size) {
-            if (logs.isNotEmpty()) listState.animateScrollToItem(logs.size - 1)
+        val scope = rememberCoroutineScope()
+        var followTail by rememberSaveable { mutableStateOf(true) }
+        LaunchedEffect(listState) {
+            // 用户查看历史输出时暂停跟随，追加日志不改变用户的选择。
+            snapshotFlow { listState.isScrollInProgress to listState.canScrollForward }
+                .collect { (scrolling, hasMore) -> if (scrolling) followTail = !hasMore }
         }
-        LazyColumn(
-            state = listState,
-            modifier = modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-        ) {
-            items(logs) { entry ->
-                Text(
-                    text = "${entry.time} ${entry.msg}",
-                    fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = when (entry.level) {
-                        'E' -> MaterialTheme.colorScheme.error
-                        'W' -> MaterialTheme.colorScheme.tertiary
-                        'D' -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.colorScheme.onSurface
-                    },
-                    modifier = Modifier.padding(vertical = 1.dp)
-                )
+        LaunchedEffect(logs) {
+            if (logs.isNotEmpty() && followTail) listState.scrollToItem(logs.lastIndex)
+        }
+        Box(modifier) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(bottom = if (followTail) 8.dp else 52.dp)
+            ) {
+                items(logs) { entry ->
+                    Text(
+                        text = "${entry.time} ${entry.level} ${entry.msg}",
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = when (entry.level) {
+                            'E' -> MaterialTheme.colorScheme.error
+                            'W' -> MaterialTheme.colorScheme.tertiary
+                            'D' -> MaterialTheme.colorScheme.onSurfaceVariant
+                            else -> MaterialTheme.colorScheme.onSurface
+                        },
+                        modifier = Modifier.padding(vertical = 1.dp)
+                    )
+                }
+            }
+            if (!followTail) {
+                Button(onClick = {
+                    followTail = true
+                    scope.launch { if (logs.isNotEmpty()) listState.scrollToItem(logs.lastIndex) }
+                }, modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)) { Text("回到最新") }
             }
         }
     }
@@ -1591,18 +1631,27 @@ class MainActivity : ComponentActivity() {
         onDismiss: () -> Unit,
         onConfirm: (String, TaskManager.Scaffold) -> Unit
     ) {
-        var name by mutableStateOf("")
-        var scaffold by mutableStateOf(TaskManager.Scaffold.BLANK)
+        var name by rememberSaveable { mutableStateOf("") }
+        var scaffold by rememberSaveable { mutableStateOf(TaskManager.Scaffold.BLANK) }
+        val trimmed = name.trim()
+        val nameError = when {
+            trimmed.length > 50 -> "名称最多 50 个字符"
+            trimmed.contains('/') || trimmed.contains('\\') || trimmed == "." || trimmed == ".." -> "名称不能包含路径符号"
+            tasks.any { it.name == trimmed } -> "该名称已存在，请换一个名称"
+            else -> null
+        }
         AlertDialog(
             onDismissRequest = onDismiss,
             title = { Text("新建任务") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it },
                         label = { Text("任务名称") },
-                        singleLine = true
+                        singleLine = true,
+                        isError = nameError != null,
+                        supportingText = { Text(nameError ?: "使用易于辨认的名称，如：每日签到") }
                     )
                     Text(
                         "脚手架",
@@ -1633,8 +1682,8 @@ class MainActivity : ComponentActivity() {
                 }
             },
             confirmButton = {
-                TextButton(onClick = { onConfirm(name, scaffold) }, enabled = name.isNotBlank()) {
-                    Text("创建")
+                TextButton(onClick = { onConfirm(trimmed, scaffold) }, enabled = trimmed.isNotBlank() && nameError == null) {
+                    Text("创建并编辑")
                 }
             },
             dismissButton = {

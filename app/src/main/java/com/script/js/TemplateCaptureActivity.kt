@@ -126,7 +126,7 @@ class TemplateCaptureActivity : ComponentActivity() {
                         TextButton(onClick = { captureFrame() }) { Text("重截") }
                         TextButton(
                             onClick = { openSaveDialog() },
-                            enabled = selection != null
+                            enabled = selectionValid()
                         ) { Text("保存") }
                         TextButton(onClick = { finish() }) { Text("取消") }
                     }
@@ -220,11 +220,12 @@ class TemplateCaptureActivity : ComponentActivity() {
                     Text(
                         if (bitmap == null) "等待截图"
                         else if (sel == null) "在截图上拖拽，框选要作为模板的区域"
+                        else if (!selectionValid()) "选区至少需要 ${MIN_SIZE} × ${MIN_SIZE} px"
                         else "选区: ${sel.width()} x ${sel.height()}  @(${sel.left}, ${sel.top})",
                         style = MaterialTheme.typography.bodySmall
                     )
                     if (bitmap != null && sel != null) {
-                        Button(onClick = { openSaveDialog() }) { Text("保存为模板") }
+                        Button(onClick = { openSaveDialog() }, enabled = selectionValid()) { Text("保存为模板") }
                     }
                 }
             }
@@ -286,10 +287,12 @@ class TemplateCaptureActivity : ComponentActivity() {
     }
 
     private fun openSaveDialog() {
-        if (selection == null || bitmap == null) return
+        if (!selectionValid() || bitmap == null) return
         if (fileName.isBlank()) fileName = TaskManager.suggestImageName(this, taskName)
         showSaveDialog = true
     }
+
+    private fun selectionValid(): Boolean = selection?.let { it.width() >= MIN_SIZE && it.height() >= MIN_SIZE } == true
 
     /** 裁剪选区并写入任务 images/ 目录 */
     private fun saveSelection() {

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -152,14 +153,16 @@ class ScriptEditorActivity : ComponentActivity() {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        .weight(1f)
                         .padding(8.dp)
                 ) {
                     BasicTextField(
                         value = content,
                         onValueChange = { new ->
                             // 自动缩进 / 括号配对（只影响单字符插入，粘贴原样放行）
-                            content = Edits.apply(content, new)
-                            dirty = true
+                            val edited = Edits.apply(content, new)
+                            if (edited.text != content.text) dirty = true
+                            content = edited
                         },
                         textStyle = TextStyle(
                             fontFamily = FontFamily.Monospace,
@@ -173,6 +176,20 @@ class ScriptEditorActivity : ComponentActivity() {
                         },
                         modifier = Modifier.fillMaxSize()
                     )
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    val position = remember(content.text, content.selection.start) {
+                        val before = content.text.take(content.selection.start)
+                        val line = before.count { it == '\n' } + 1
+                        val column = before.length - before.lastIndexOf('\n')
+                        line to column
+                    }
+                    Text("Ln ${position.first}, Col ${position.second}",
+                        style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                    Spacer(Modifier.weight(1f))
+                    Text(if (dirty) "待保存 · 离开时自动保存" else "已保存",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }

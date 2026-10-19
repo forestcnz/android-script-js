@@ -38,6 +38,11 @@ class ScreenCaptureService : Service() {
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
 
+    // 屏幕方向监听：横竖屏切换时调整虚拟屏，保证截屏方向与屏幕一致
+    private var displayManager: DisplayManager? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
+    private var rotation: Int = android.view.Surface.ROTATION_0
+
     @Volatile
     private var latest: Bitmap? = null
 
@@ -160,19 +165,23 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    /** 读取当前屏幕尺寸（随横竖屏方向变化） */
+    private fun readScreenSize(): Pair<Int, Int> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val wm = getSystemService(android.view.WindowManager::class.java)
+            val bounds = wm.currentWindowMetrics.bounds
+            Pair(bounds.width(), bounds.height())
+        } else {
+            @Suppress("DEPRECATION")
+            val dm = resources.displayMetrics
+            Pair(dm.widthPixels, dm.heightPixels)
+        }
+
     private fun setupProjection(resultCode: Int, data: Intent) {
         try {
-            val metrics = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                val wm = getSystemService(android.view.WindowManager::class.java)
-                val bounds = wm.currentWindowMetrics.bounds
-                Pair(bounds.width(), bounds.height())
-            } else {
-                @Suppress("DEPRECATION")
-                val dm = resources.displayMetrics
-                Pair(dm.widthPixels, dm.heightPixels)
-            }
-            width = metrics.first
-            height = metrics.second
+            val size = readScreenSize()
+            width = size.first
+            height = size.second
 
             val mpm = getSystemService(MediaProjectionManager::class.java)
             val mp = mpm.getMediaProjection(resultCode, data)
@@ -214,8 +223,16 @@ class ScreenCaptureService : Service() {
             )
             instance = this
             readyAtMillis = android.os.SystemClock.uptimeMillis()
+
+            // 记录建屏时的屏幕方向，并监听旋转：横屏游戏等场景下方向变化时重建虚拟屏，
+            // 否则截屏 buffer 固定为授权时的方向，画面被旋转 90°，找图匹配不上、点击坐标也不对
+            rotation = getSystemService(DisplayManager::class.java)
+                .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation
+                ?: android.view.Surface.ROTATION_0
+            registerRotationListener(h)
+
             signalReady(true)
-            Log.i(TAG, "截屏服务就绪: ${width}x$height")
+            Log.i(TAG, "截屏服务就绪: ${width}x$height rotation=$rotation")
         } catch (e: Exception) {
             Log.w(TAG, "建立投影失败: ${e.message}")
             signalReady(false)
@@ -223,8 +240,64 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    /** 注册屏幕方向监听（回调跑在截屏线程，与取帧串行，避免竞争） */
+    private fun registerRotationListener(h: Handler) {
+        val dm = getSystemService(DisplayManager::class.java)
+        displayManager = dm
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId != android.view.Display.DEFAULT_DISPLAY) return
+                val newRotation = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: return
+                if (newRotation != rotation) h.post { rebuildDisplay() }
+            }
+        }
+        displayListener = listener
+        dm.registerDisplayListener(listener, h)
+    }
+
+    /**
+     * 屏幕旋转后调整现有虚拟屏，替换对应尺寸的 ImageReader。
+     * Android 14+ 同一个 MediaProjection 只能 createVirtualDisplay 一次，
+     * 因此必须使用 resize + setSurface，不能释放后重新创建虚拟屏。
+     */
+    private fun rebuildDisplay() {
+        val display = virtualDisplay ?: return
+        val dm = displayManager ?: return
+        val newRotation = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: return
+        if (newRotation == rotation) return
+        var replacement: ImageReader? = null
+        try {
+            val size = readScreenSize()
+            val reader = ImageReader.newInstance(size.first, size.second, PixelFormat.RGBA_8888, 2)
+            replacement = reader
+            reader.setOnImageAvailableListener({ r -> consumeLatest(r) }, handler)
+            display.resize(size.first, size.second, resources.displayMetrics.densityDpi)
+            display.surface = reader.surface
+            val oldReader = imageReader
+            width = size.first
+            height = size.second
+            imageReader = reader
+            replacement = null
+            rotation = newRotation
+            // 重置刷新标记：新方向首帧到达前 captureFromProjection 会继续等待，
+            // 同时清空 latest，避免等待超时后回退到旧方向的截图。
+            hasFreshFrame = false
+            latest = null
+            readyAtMillis = android.os.SystemClock.uptimeMillis()
+            oldReader?.close()
+            Log.i(TAG, "屏幕方向变更，虚拟屏尺寸已调整: ${width}x$height rotation=$rotation")
+        } catch (e: Exception) {
+            replacement?.close()
+            Log.w(TAG, "调整虚拟屏失败: ${e.message}")
+        }
+    }
+
     /** 取最新帧转 Bitmap（保序：只保留最近一帧） */
     private fun consumeLatest(reader: ImageReader) {
+        // 旋转时队列中可能还留有旧 reader 的回调，不能按新尺寸读取旧 buffer。
+        if (reader !== imageReader) return
         val image = try {
             reader.acquireLatestImage()
         } catch (e: Exception) {
@@ -252,11 +325,22 @@ class ScreenCaptureService : Service() {
         } catch (e: Exception) {
             Log.w(TAG, "取帧失败: ${e.message}")
         } finally {
-            image.close()
+            // 虚拟屏重建瞬间旧 reader 可能已关闭，此处 close 陈旧 image 会抛异常，兜住避免崩溃截屏线程
+            try {
+                image.close()
+            } catch (_: Exception) {
+            }
         }
     }
 
     private fun release() {
+        // 注销屏幕方向监听，避免持有已销毁服务的引用
+        try {
+            displayListener?.let { displayManager?.unregisterDisplayListener(it) }
+        } catch (_: Exception) {
+        }
+        displayListener = null
+        displayManager = null
         try {
             virtualDisplay?.release()
         } catch (_: Exception) {
