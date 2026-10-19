@@ -8,7 +8,7 @@ auto.waitFor(5000);
 if (!auto.service) { toastLog("请先开启无障碍服务"); exit(); }
 if (!requestScreenCapture()) { toastLog("请先授权屏幕录制"); exit(); }
 
-var THRESHOLD = 0.9;    // 模板相似度阈值（0~1）
+var THRESHOLD = 0.8;    // 模板相似度阈值（0~1）
 var POLL_MS = 800;      // 未找到时的轮询间隔（毫秒）
 var CLICK_REST = 1200;  // 点击后停顿，等界面刷新，避免连点
 
