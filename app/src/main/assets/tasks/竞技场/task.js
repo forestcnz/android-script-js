@@ -10,6 +10,7 @@ var arena = images.read("images/竞技场.png");
 var randomBattle = images.read("images/随机战.png");
 var battleBar = images.read("images/战斗血条.png");
 var defeat = images.read("images/战败装备强化.png");
+var firstWinGift = images.read("images/首胜礼包.png");
 if (!arena || !randomBattle || !battleBar || !defeat) {
     toastLog("竞技场素材不完整，请检查 images/ 下的 4 张图片");
     exit();
@@ -115,14 +116,29 @@ try {
 } finally {
     try {
         if (arenaOpened) {
-            tap("关闭竞技场", 1666, 103);
-            sleep(500);
+            try {
+                if (firstWinGift) {
+                    var gift = find(firstWinGift, 3);
+                    if (gift) {
+                        tapImage("领取首胜礼包", gift);
+                        sleep(1000);
+                    } else {
+                        log("未找到首胜礼包，继续关闭竞技场");
+                    }
+                } else {
+                    log("缺少首胜礼包素材，继续关闭竞技场");
+                }
+            } finally {
+                tap("关闭竞技场", 1666, 103);
+                sleep(500);
+            }
         }
     } finally {
         images.release(arena);
         images.release(randomBattle);
         images.release(battleBar);
         images.release(defeat);
+        if (firstWinGift) images.release(firstWinGift);
     }
 }
 if (arenaOpened) toastLog("竞技场完成：共点击 " + battles + " 次随机战");
