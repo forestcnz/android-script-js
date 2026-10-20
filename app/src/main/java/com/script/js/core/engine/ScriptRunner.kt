@@ -241,7 +241,7 @@ object ScriptRunner {
             // 运行期保活：常驻前台服务（低优先级通知 + 状态自检 + 通知栏停止）
             ScriptForegroundService.start(app, taskName)
             withContext(Dispatchers.Main) {
-                // 悬浮控件进入运行态，在屏幕顶部显示任务名与停止按钮。
+                // 悬浮控件进入运行态，在屏幕左下角显示任务名与停止按钮。
                 FloatyManager.setRunning(app, taskName)
             }
 

@@ -23,7 +23,7 @@ import android.widget.TextView
  *
  * 控件有状态，就地变形而不是叠加多个窗口：
  * - 空闲态：圆球「JS」，点击展开面板，拖动可移动并自动贴边（位置会记住）；
- * - 运行态：屏幕顶部矩形条显示任务名与「停止」按钮，单击即可停止。
+ * - 运行态：屏幕左下角矩形条显示任务名与「停止」按钮，单击即可停止。
  *
  * 贴边后空闲球半隐藏：约一半探出屏外，点击先弹出完整显示，再次点击才展开面板；
  * 半隐藏位置会持久化，重启后保持贴边形态。
@@ -51,8 +51,8 @@ object FloatyManager {
     /** 空闲球尺寸（dp），与 ballView 保持一致 */
     private const val BALL_SIZE_DP = 35
 
-    /** 运行条尺寸：原 320×52dp 缩小约三分之一。 */
-    private const val RUNNING_BAR_WIDTH_DP = 213
+    /** 运行条尺寸：宽度约为上一版 213dp 的一半。 */
+    private const val RUNNING_BAR_WIDTH_DP = 107
     private const val RUNNING_BAR_HEIGHT_DP = 35
 
     /** 贴边半隐藏：探出屏外的部分占球宽的比例（剩余半圆留在屏内，可点击弹出） */
@@ -277,9 +277,9 @@ object FloatyManager {
                                 ?: (RUNNING_BAR_WIDTH_DP * density).toInt()
                             val barH = capsule.height.takeIf { it > 0 }
                                 ?: (RUNNING_BAR_HEIGHT_DP * density).toInt()
-                            val maxOffsetX = ((metrics.widthPixels - barW) / 2).coerceAtLeast(0)
-                            params.x = (startX + dx).coerceIn(-maxOffsetX, maxOffsetX)
-                            params.y = (startY + dy).coerceIn(0, (metrics.heightPixels - barH).coerceAtLeast(0))
+                            params.x = (startX + dx).coerceIn(0, (metrics.widthPixels - barW).coerceAtLeast(0))
+                            // BOTTOM 重力下，y 是距底边的距离，向下拖动要减小 y。
+                            params.y = (startY - dy).coerceIn(0, (metrics.heightPixels - barH).coerceAtLeast(0))
                         } else {
                             hideTaskPanel()
                             params.x = startX + dx
@@ -347,7 +347,7 @@ object FloatyManager {
         Log.i(TAG, "悬浮控件已隐藏")
     }
 
-    /** 切换到运行态：顶部矩形条显示任务名和单击停止按钮。 */
+    /** 切换到运行态：左下角矩形条显示任务名和单击停止按钮。 */
     fun setRunning(context: Context, taskName: String) {
         hideTaskPanel()
         if (capsuleView?.isAttachedToWindow != true) {
@@ -387,7 +387,7 @@ object FloatyManager {
     /**
      * 按当前状态重建胶囊内容：
      * - 空闲：35dp 圆球「JS」+ 右下角状态点（绿=就绪）；
-     * - 运行：顶部矩形条，显示任务名和停止按钮。
+     * - 运行：左下角矩形条，显示任务名和停止按钮。
      */
     @SuppressLint("SetTextI18n")
     private fun renderCapsule(context: Context) {
@@ -442,14 +442,14 @@ object FloatyManager {
         }
     }
 
-    /** 由系统水平居中，避开 ROM 报告的屏幕宽度与实际显示帧不一致。 */
+    /** 由系统从左下角定位，避开 ROM 报告的屏幕高度与实际显示帧不一致。 */
     private fun positionRunningBar(context: Context) {
         if (runningTask == null) return
         val view = capsuleView ?: return
         val params = capsuleParams ?: return
-        params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-        params.x = 0
-        params.y = (8 * context.resources.displayMetrics.density).toInt()
+        params.gravity = Gravity.BOTTOM or Gravity.START
+        params.x = (8 * context.resources.displayMetrics.density).toInt()
+        params.y = (12 * context.resources.displayMetrics.density).toInt()
         try {
             windowManager?.updateViewLayout(view, params)
         } catch (_: Exception) {
@@ -504,7 +504,7 @@ object FloatyManager {
         }
     }
 
-    /** 顶部任务条：任务名占剩余空间，停止按钮可单击。 */
+    /** 左下角任务条：任务名占剩余空间，停止按钮可单击。 */
     private fun runningBar(context: Context, task: String): View {
         val d = context.resources.displayMetrics.density
         val width = (RUNNING_BAR_WIDTH_DP * d).toInt()
@@ -514,14 +514,13 @@ object FloatyManager {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = roundedBackground(COLOR_BG, 7 * d, 1 * d, 0x33FFFFFF)
-            setPadding((8 * d).toInt(), 0, (5 * d).toInt(), 0)
+            setPadding((5 * d).toInt(), 0, (4 * d).toInt(), 0)
         }
-        bar.addView(statusDot(context), LinearLayout.LayoutParams((6 * d).toInt(), (6 * d).toInt()))
         bar.addView(
-            textView(context, task, 12f, COLOR_TEXT).apply {
+            textView(context, task, 11f, COLOR_TEXT).apply {
                 maxLines = 1
                 ellipsize = android.text.TextUtils.TruncateAt.END
-                setPadding((7 * d).toInt(), 0, (4 * d).toInt(), 0)
+                setPadding((2 * d).toInt(), 0, (2 * d).toInt(), 0)
             },
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
@@ -533,7 +532,7 @@ object FloatyManager {
                 contentDescription = "停止任务 $task"
                 setOnClickListener { onStopClicked?.invoke() }
             },
-            LinearLayout.LayoutParams((46 * d).toInt(), (27 * d).toInt())
+            LinearLayout.LayoutParams((42 * d).toInt(), (27 * d).toInt())
         )
         bar.layoutParams = LinearLayout.LayoutParams(width, (RUNNING_BAR_HEIGHT_DP * d).toInt())
         return bar

@@ -70,6 +70,7 @@ function claimIfAvailable() {
 try {
     tapAt("地图", 1764, 25, 1200);
     tapAt("家园", 1356, 694, 2500);
+    tapAt("家园地图", 1743, 565, 1200);
     tapTemplate("家园后山按钮", backHill, 1500);
     tapTemplate("送我去资源场", resourceField, 2500);
     claimIfAvailable();

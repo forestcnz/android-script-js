@@ -81,7 +81,7 @@ try {
     attackFive("16 层");
     tapVictoryClose();
 
-    tapImage("90恩仇20_21传送", portal, 2000);
+    tapImage("90恩仇20_21传送", portal, 5000);
     tapImage("90恩仇21", stage21, 1500);
     attackFive("21 层");
     tapVictoryClose();
