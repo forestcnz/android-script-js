@@ -177,7 +177,7 @@ object ScreenCapture {
      * - Root/Shizuku 通道：直接静默截屏（失败则尝试 MediaProjection 兜底）；
      * - MediaProjection 通道：取投影帧（等待刷新帧，避免拿到授权弹窗残留画面）。
      */
-    fun capture(timeoutMs: Long = 2000): Bitmap? {
+    fun capture(timeoutMs: Long = 2000, newerThanUptimeMs: Long = 0): Bitmap? {
         val context = appContext
         if (context != null) {
             val channel = activeChannel(context)
@@ -186,18 +186,20 @@ object ScreenCapture {
                 Log.w(TAG, "静默截屏失败，尝试 MediaProjection 兜底")
             }
         }
-        return captureFromProjection(timeoutMs)
+        return captureFromProjection(timeoutMs, newerThanUptimeMs)
     }
 
     /** MediaProjection 通道取帧 */
-    private fun captureFromProjection(timeoutMs: Long): Bitmap? {
-        ScreenCaptureService.freshFrame()?.let { return it }
+    private fun captureFromProjection(timeoutMs: Long, newerThanUptimeMs: Long): Bitmap? {
+        fun frame() = if (newerThanUptimeMs > 0) ScreenCaptureService.frameAfter(newerThanUptimeMs)
+            else ScreenCaptureService.freshFrame()
+        frame()?.let { return it }
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             Thread.sleep(50)
-            ScreenCaptureService.freshFrame()?.let { return it }
+            frame()?.let { return it }
         }
-        return ScreenCaptureService.latestFrame()
+        return if (newerThanUptimeMs > 0) null else ScreenCaptureService.latestFrame()
     }
 
     /** 释放投影（停止前台服务） */

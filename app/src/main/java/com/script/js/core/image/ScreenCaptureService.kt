@@ -86,6 +86,10 @@ class ScreenCaptureService : Service() {
         /** 已刷新过的帧（跳过投影建立瞬间的初始帧）；脚本侧优先使用 */
         fun freshFrame(): Bitmap? = instance?.let { if (hasFreshFrame) it.latest else null }
 
+        /** 录制隐藏悬浮层后仅接受新帧，禁止返回含录制控件的缓存截图。 */
+        fun frameAfter(uptimeMs: Long): Bitmap? =
+            if (hasFreshFrame && frameAtMillis > uptimeMs) instance?.latest else null
+
         /** 启动前台服务并用授权结果建立投影，阻塞等待就绪 */
         fun startAndAwait(context: Context, resultCode: Int, data: Intent, timeoutMs: Long): Boolean {
             if (ready) return true

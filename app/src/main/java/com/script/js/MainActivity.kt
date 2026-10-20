@@ -83,6 +83,9 @@ import com.script.js.core.gesture.ScriptAccessibilityService
 import com.script.js.core.image.ScreenCapture
 import com.script.js.core.image.SilentCapture
 import com.script.js.core.pack.ApkPackager
+import com.script.js.core.recording.RecordingService
+import com.script.js.core.recording.RecordingMode
+import com.script.js.core.gesture.GestureClient
 import com.script.js.core.task.ScheduleManager
 import com.script.js.core.task.RunHistory
 import com.script.js.core.task.TaskManager
@@ -103,6 +106,9 @@ import rikka.shizuku.Shizuku
  * 任务模型见 docs/DESIGN.md 第 4.1 节。
  */
 class MainActivity : ComponentActivity() {
+    companion object {
+        const val EXTRA_SHOW_TASKS = "show_recorded_tasks"
+    }
 
     // 权限状态（页面可见期间每秒轮询刷新）
     private var a11yEnabled by mutableStateOf(false)
@@ -110,9 +116,13 @@ class MainActivity : ComponentActivity() {
     private var captureReady by mutableStateOf(false)
     private var tasks by mutableStateOf(emptyList<TaskManager.TaskInfo>())
     private var showCreateDialog by mutableStateOf(false)
+    private var taskMetadataVersion by mutableStateOf(0)
 
     /** 任务操作菜单/素材管理 */
     private var menuTask by mutableStateOf<String?>(null)
+    private var renamingTask by mutableStateOf<String?>(null)
+    private var deletingTask by mutableStateOf<String?>(null)
+    private var taskMutationBusy by mutableStateOf(false)
     private var assetsTask by mutableStateOf<String?>(null)
     private var assets by mutableStateOf(emptyList<TaskManager.ImageInfo>())
     private var previewAsset by mutableStateOf<TaskManager.ImageInfo?>(null)
@@ -221,6 +231,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         mainTab = savedInstanceState?.getInt("main_tab", 0)?.coerceIn(0, 3) ?: 0
+        if (intent.getBooleanExtra(EXTRA_SHOW_TASKS, false)) mainTab = 0
         showCreateDialog = savedInstanceState?.getBoolean("create_dialog", false) ?: false
         setContent {
             ScriptTheme {
@@ -257,6 +268,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        taskMetadataVersion++
         // 悬浮窗默认开启：已授权则自动显示悬浮球；未授权则首次自动引导去授权
         autoEnableFloaty()
         // 静默通道探测放到后台线程：完成后 chip 立即显示「截屏 ✓」
@@ -281,6 +293,15 @@ class MainActivity : ComponentActivity() {
         Shizuku.removeRequestPermissionResultListener(shizukuPermissionListener)
         ScreenCapture.unbind(this)
         super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_SHOW_TASKS, false)) {
+            mainTab = 0
+            taskMetadataVersion++
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -324,7 +345,7 @@ class MainActivity : ComponentActivity() {
         val pageStates = rememberSaveableStateHolder()
 
         // 任务副标题（描述/目标应用）：任务集合变化时后台读取一次，避免每秒轮询做文件 IO
-        LaunchedEffect(tasks) {
+        LaunchedEffect(tasks, taskMetadataVersion) {
             taskSubtitles = withContext(Dispatchers.IO) {
                 tasks.associate { t ->
                     val cfg = TaskManager.readConfig(this@MainActivity, t.name)
@@ -397,6 +418,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+
         if (showCreateDialog) {
             CreateTaskDialog(
                 onDismiss = { showCreateDialog = false },
@@ -423,6 +445,8 @@ class MainActivity : ComponentActivity() {
                     menuTask = null
                     editTask(name)
                 },
+                onRename = { menuTask = null; renamingTask = name },
+                onDelete = { menuTask = null; deletingTask = name },
                 onCaptureTemplate = {
                     menuTask = null
                     startActivity(
@@ -465,6 +489,21 @@ class MainActivity : ComponentActivity() {
                         }
                     } ?: "1"
                 }
+            )
+        }
+
+        renamingTask?.let { name -> RenameTaskDialog(name) }
+        deletingTask?.let { name ->
+            AlertDialog(
+                onDismissRequest = { if (!taskMutationBusy) deletingTask = null },
+                title = { Text("删除任务") },
+                text = { Text("确定删除「$name」？脚本、素材、录制范围图和运行历史都会删除，定时任务也会取消。此操作无法撤销。") },
+                confirmButton = {
+                    TextButton(enabled = !taskMutationBusy, onClick = {
+                        performTaskChange({ TaskManager.deleteTask(this, name) }, "已删除任务「$name」") { deletingTask = null }
+                    }) { Text(if (taskMutationBusy) "正在删除…" else "删除", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = { TextButton(enabled = !taskMutationBusy, onClick = { deletingTask = null }) { Text("取消") } }
             )
         }
 
@@ -652,6 +691,8 @@ class MainActivity : ComponentActivity() {
         taskName: String,
         onDismiss: () -> Unit,
         onEditScript: () -> Unit,
+        onRename: () -> Unit,
+        onDelete: () -> Unit,
         onCaptureTemplate: () -> Unit,
         onManageAssets: () -> Unit,
         onSchedule: () -> Unit,
@@ -666,6 +707,8 @@ class MainActivity : ComponentActivity() {
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     ToolRow("编辑脚本", "修改任务脚本", R.drawable.ic_code, onEditScript)
+                    ToolRow("重命名", "修改任务名称，保留脚本与素材", R.drawable.ic_code, onRename)
+                    ToolRow("删除任务", "删除脚本、素材及相关记录", R.drawable.ic_stop, onDelete)
                     ToolRow("定时运行", schedules[taskName]?.describe() ?: "尚未设置运行时间",
                         R.drawable.ic_clock, onSchedule)
                     ToolRow("运行历史", "查看执行结果与耗时", R.drawable.ic_tool_log, onHistory)
@@ -1028,6 +1071,9 @@ class MainActivity : ComponentActivity() {
         WorkCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(bottom = 8.dp)) {
                 SectionTitle("屏幕工具", "拾取结果可直接用于脚本")
+                ToolRow("操作录制", "真实执行点击和滑动，截图并生成任务", R.drawable.ic_record) {
+                    com.script.js.core.recording.RecordingSetupOverlay.show(this@MainActivity)
+                }
                 ToolRow("取坐标", "点选屏幕位置，生成点击代码", R.drawable.ic_tool_point) {
                     showPicker(PickerOverlay.Mode.POINT)
                 }
@@ -1540,6 +1586,52 @@ class MainActivity : ComponentActivity() {
                     followTail = true
                     scope.launch { if (logs.isNotEmpty()) listState.scrollToItem(logs.lastIndex) }
                 }, modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp)) { Text("回到最新") }
+            }
+        }
+    }
+
+    @Composable
+    private fun RenameTaskDialog(oldName: String) {
+        var name by remember(oldName) { mutableStateOf(oldName) }
+        val trimmed = name.trim()
+        val invalid = trimmed.isBlank() || trimmed.length > 50 || trimmed == "." || trimmed == ".." ||
+            trimmed.any { it == '/' || it == '\\' || it.isISOControl() } ||
+            tasks.any { it.name == trimmed && it.name != oldName }
+        AlertDialog(
+            onDismissRequest = { if (!taskMutationBusy) renamingTask = null },
+            title = { Text("重命名任务") },
+            text = {
+                Column {
+                    OutlinedTextField(name, { name = it }, modifier = Modifier.fillMaxWidth(),
+                        label = { Text("任务名称") }, singleLine = true, enabled = !taskMutationBusy,
+                        isError = invalid, supportingText = { Text(if (invalid) "名称非法或与现有任务重复" else "脚本、素材与历史记录会一同保留") })
+                    if (schedules.containsKey(oldName)) Text("定时任务将保留原设置，并从改名后重新计时。", style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = !invalid && !taskMutationBusy, onClick = {
+                    performTaskChange({ TaskManager.renameTask(this, oldName, trimmed) }, "已改名为「$trimmed」") { renamingTask = null }
+                }) { Text(if (taskMutationBusy) "正在保存…" else "保存") }
+            },
+            dismissButton = { TextButton(enabled = !taskMutationBusy, onClick = { renamingTask = null }) { Text("取消") } }
+        )
+    }
+
+    private fun performTaskChange(operation: () -> Result<*>, successMessage: String, onSuccess: () -> Unit) {
+        if (taskMutationBusy) return
+        taskMutationBusy = true
+        lifecycleScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) { operation() }
+                if (result.isSuccess) {
+                    tasks = withContext(Dispatchers.IO) { TaskManager.listTasks(this@MainActivity) }
+                    taskMetadataVersion++
+                    ScriptRunner.appendLog(successMessage)
+                    Toast.makeText(this@MainActivity, successMessage, Toast.LENGTH_SHORT).show()
+                    onSuccess()
+                } else Toast.makeText(this@MainActivity, result.exceptionOrNull()?.message ?: "操作失败", Toast.LENGTH_LONG).show()
+            } finally {
+                taskMutationBusy = false
             }
         }
     }

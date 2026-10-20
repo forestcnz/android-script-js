@@ -100,6 +100,15 @@
 
         <!-- 截屏服务：持有 MediaProjection，为脚本找图提供屏幕帧 -->
         <service
+            android:name=".core.recording.RecordingService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="user_initiated_touch_recording" />
+        </service>
+
+        <service
             android:name=".core.image.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />

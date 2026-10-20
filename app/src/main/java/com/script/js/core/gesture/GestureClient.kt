@@ -95,6 +95,46 @@ object GestureClient {
     /** 手势能力是否可用（服务已连接） */
     fun available(): Boolean = service() != null
 
+    /**
+     * 录制专用：只派发一次，等待系统完成回调，不显示特效、不自动补点。
+     * 已受理后取消/超时可能已有部分触摸生效，不能再用 Root 重试造成重复操作。
+     */
+    fun dispatchRecorded(points: List<Pair<Float, Float>>, durationMs: Long): Boolean {
+        val svc = service() ?: return false
+        if (points.isEmpty() || durationMs !in 1..60_000) return false
+        val latch = CountDownLatch(1)
+        val completed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val expired = java.util.concurrent.atomic.AtomicBoolean(false)
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        handler.post {
+            if (expired.get()) { latch.countDown(); return@post }
+            try {
+                val path = Path().apply {
+                    moveTo(points.first().first, points.first().second)
+                    points.drop(1).forEach { lineTo(it.first, it.second) }
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs)).build()
+                val accepted = svc.dispatchGesture(gesture, object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        completed.set(true)
+                        latch.countDown()
+                    }
+                    override fun onCancelled(gestureDescription: GestureDescription?) { latch.countDown() }
+                }, handler)
+                if (!accepted) latch.countDown()
+            } catch (e: Exception) {
+                Log.w(TAG, "录制手势派发失败: ${e.message}")
+                latch.countDown()
+            }
+        }
+        return try {
+            latch.await(durationMs + 3000, TimeUnit.MILLISECONDS) && completed.get()
+        } finally {
+            expired.set(true)
+        }
+    }
+
     /** 单笔手势描述（多指 gestures API 用） */
     data class Stroke(
         val durationMs: Long,
@@ -180,7 +220,11 @@ object GestureClient {
         )
         // dispatchGesture 返回 false 表示未受理（服务状态异常）
         if (!accepted) return false
-        latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        val durationMs = (0 until gesture.strokeCount).maxOfOrNull {
+            val stroke = gesture.getStroke(it)
+            stroke.startTime + stroke.duration
+        } ?: 0L
+        latch.await(durationMs + TIMEOUT_SECONDS * 1000, TimeUnit.MILLISECONDS)
         return completed
     }
 }

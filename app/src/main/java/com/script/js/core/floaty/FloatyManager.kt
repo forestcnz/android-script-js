@@ -205,6 +205,7 @@ object FloatyManager {
      */
     @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
     fun showLauncher(context: Context, keepAlive: Boolean = true): Boolean {
+        if (com.script.js.core.recording.RecordingService.active) return false
         appContext = context.applicationContext
         if (!hasOverlayPermission(context)) {
             if (keepAlive) FloatyForegroundService.stop(context)
@@ -830,6 +831,10 @@ object FloatyManager {
         tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_tool_log, "日志") {
             hideTaskPanel()
             ConsoleOverlay.toggle(context)
+        })
+        tools.addView(toolIconButton(context, com.script.js.R.drawable.ic_record, "录制操作") {
+            hideTaskPanel()
+            com.script.js.core.recording.RecordingSetupOverlay.show(context)
         })
         panel.addView(tools)
 

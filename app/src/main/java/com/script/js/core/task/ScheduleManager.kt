@@ -83,8 +83,24 @@ object ScheduleManager {
     /** 取消任务的定时 */
     fun remove(context: Context, taskName: String): Boolean {
         val list = load(context).filterNot { it.taskName == taskName }
-        save(context, list)
+        if (!save(context, list)) return false
         cancelWork(context, taskName)
+        return true
+    }
+
+    /** 改名保留定时参数，使用新任务名重新排程。 */
+    @Synchronized
+    fun rename(context: Context, oldName: String, newName: String): Boolean {
+        val original = load(context)
+        val previous = original.firstOrNull { it.taskName == oldName } ?: return true
+        val updated = previous.copy(taskName = newName)
+        if (!save(context, original.filterNot { it.taskName == oldName } + updated)) return false
+        if (updated.enabled && !enqueue(context, updated)) {
+            save(context, original)
+            cancelWork(context, newName)
+            return false
+        }
+        cancelWork(context, oldName)
         return true
     }
 
@@ -109,7 +125,15 @@ object ScheduleManager {
                 put("enabled", s.enabled)
             })
         }
-        file(context).writeText(arr.toString(2))
+        val atomic = android.util.AtomicFile(file(context))
+        val stream = atomic.startWrite()
+        try {
+            stream.write(arr.toString(2).toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(stream)
+        } catch (e: Exception) {
+            atomic.failWrite(stream)
+            throw e
+        }
         true
     } catch (e: Exception) {
         Log.w(TAG, "保存定时任务失败: ${e.message}")

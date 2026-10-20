@@ -54,7 +54,7 @@ object TaskManager {
 
     /** 列出所有任务（含 task.js 的目录），按名称排序 */
     fun listTasks(context: Context): List<TaskInfo> =
-        tasksRoot(context).listFiles { f -> f.isDirectory && File(f, "task.js").isFile }
+        tasksRoot(context).listFiles { f -> f.isDirectory && !f.name.startsWith(".deleted-") && File(f, "task.js").isFile }
             ?.map { TaskInfo(it.name) }
             ?.sortedBy { it.name }
             ?: emptyList()
@@ -81,6 +81,85 @@ object TaskManager {
             File(dir, "images").mkdirs()
         }
         return TaskInfo(name)
+    }
+
+    /** 重命名整个任务目录，素材与历史保持相对路径；同步迁移定时设置。 */
+    @Synchronized
+    fun renameTask(context: Context, oldName: String, rawName: String): Result<TaskInfo> = runCatching {
+        requireTasksIdle()
+        val name = rawName.trim()
+        val source = checkedTaskDir(context, oldName)
+        val target = checkedTaskDir(context, name)
+        check(File(source, "task.js").isFile) { "任务不存在" }
+        if (name == oldName) return@runCatching TaskInfo(name)
+        check(!target.exists()) { "该任务名称已存在" }
+        val configFile = File(source, "config.json")
+        val oldConfig = configFile.takeIf { it.isFile }?.readText()
+        val config = if (oldConfig != null) JSONObject(oldConfig) else JSONObject()
+        writeAtomic(configFile, config.put("name", name).toString(2))
+        if (!source.renameTo(target)) {
+            if (oldConfig != null) writeAtomic(configFile, oldConfig) else configFile.delete()
+            error("无法重命名任务目录")
+        }
+        if (!ScheduleManager.rename(context, oldName, name)) {
+            check(target.renameTo(source)) { "任务已改名为「$name」，但定时迁移失败，请重新设置定时" }
+            if (oldConfig != null) writeAtomic(configFile, oldConfig) else configFile.delete()
+            error("无法迁移定时设置，已恢复原名称")
+        }
+        suppressBuiltin(context, oldName)
+        TaskInfo(name)
+    }
+
+    /** 界面确认后调用；只允许删除任务根目录的直接子任务。 */
+    @Synchronized
+    fun deleteTask(context: Context, name: String): Result<Unit> = runCatching {
+        requireTasksIdle()
+        val directory = checkedTaskDir(context, name)
+        check(File(directory, "task.js").isFile) { "任务不存在" }
+        val removed = File(tasksRoot(context), ".deleted-${java.util.UUID.randomUUID()}")
+        check(directory.renameTo(removed)) { "无法删除任务目录" }
+        if (!ScheduleManager.remove(context, name)) {
+            check(removed.renameTo(directory)) { "定时取消失败，任务文件暂存于 ${removed.name}" }
+            error("无法取消该任务的定时设置，已恢复任务")
+        }
+        suppressBuiltin(context, name)
+        if (!removed.deleteRecursively()) android.util.Log.w("ScriptJs", "任务已移除，部分临时文件未清理：${removed.name}")
+    }
+
+    private fun requireTasksIdle() {
+        check(!com.script.js.core.recording.RecordingService.active && !com.script.js.core.engine.ScriptRunner.state.value.running) {
+            "请先完成录制或停止正在运行的任务"
+        }
+    }
+
+    private fun checkedTaskDir(context: Context, name: String): File {
+        require(name.isNotBlank() && name.length <= 50 && name != "." && name != ".." &&
+            name.none { it == '/' || it == '\\' || it.isISOControl() }) { "任务名称不合法" }
+        val root = tasksRoot(context).canonicalFile
+        return File(root, name).canonicalFile.also {
+            require(it.parentFile == root) { "任务目录超出允许范围" }
+        }
+    }
+
+    private fun writeAtomic(target: File, text: String) {
+        val file = android.util.AtomicFile(target)
+        val stream = file.startWrite()
+        try {
+            stream.write(text.toByteArray(Charsets.UTF_8))
+            file.finishWrite(stream)
+        } catch (e: Exception) {
+            file.failWrite(stream)
+            throw e
+        }
+    }
+
+    private fun suppressedBuiltins(context: Context): Set<String> =
+        context.getSharedPreferences("task_management", Context.MODE_PRIVATE)
+            .getStringSet("removed_builtins", emptySet())?.toSet() ?: emptySet()
+
+    private fun suppressBuiltin(context: Context, name: String) {
+        if (isBuiltin(context, name)) context.getSharedPreferences("task_management", Context.MODE_PRIVATE)
+            .edit().putStringSet("removed_builtins", suppressedBuiltins(context) + name).apply()
     }
 
     /** 读取任务配置（config.json）；文件缺失/解析失败返回默认配置 */
@@ -226,6 +305,7 @@ object TaskManager {
             return
         }
         for (name in names) {
+            if (name in suppressedBuiltins(context)) continue
             val target = File(root, name)
             if (target.exists()) continue
             copyAssetDir(am, "tasks/$name", target)

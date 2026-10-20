@@ -200,6 +200,10 @@ object ScriptRunner {
      * @return 是否正常执行（未运行/读取失败返回 false）
      */
     suspend fun runAndWait(context: Context, taskName: String, source: String = "手动"): Boolean {
+        if (com.script.js.core.recording.RecordingService.active) {
+            addLog('W', "正在录制操作，请完成录制后再运行任务: $taskName")
+            return false
+        }
         if (_state.value.running) {
             addLog('W', "已有任务在运行，跳过: $taskName")
             return false
