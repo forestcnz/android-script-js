@@ -373,19 +373,6 @@ class MainActivity : ComponentActivity() {
                     .fillMaxSize()
                     .padding(padding)
             ) {
-                if (runState.running) {
-                    Surface(color = MaterialTheme.colorScheme.primaryContainer) {
-                        Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically) {
-                            AppIcon(R.drawable.ic_play)
-                            Text("正在运行 · ${runState.taskName}", maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.bodyMedium,
-                                modifier = Modifier.weight(1f).padding(horizontal = 10.dp))
-                            TextButton(onClick = { ScriptRunner.stop() }) { Text("停止") }
-                        }
-                    }
-                }
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -402,7 +389,7 @@ class MainActivity : ComponentActivity() {
                                 0 -> TaskListSection(runState, Modifier.fillMaxSize())
                                 1 -> ToolsTab(launcherEnabled)
                                 2 -> LogsTab(logs)
-                                else -> PermissionsTab(runState)
+                                else -> PermissionsTab()
                             }
                         }
                     }
@@ -621,10 +608,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 任务行：名称 + 运行/定时状态 + 编辑 + 更多操作；从悬浮窗启动任务。 */
+    /** 任务行：名称 + 定时状态 + 编辑 + 更多操作；从悬浮窗启动任务。 */
     @Composable
     private fun TaskRow(task: TaskManager.TaskInfo, runState: ScriptRunner.RunState) {
-        val running = runState.running && runState.taskName == task.name
         val schedule = schedules[task.name]
         WorkCard(modifier = Modifier.fillMaxWidth()) {
             Row(
@@ -636,7 +622,6 @@ class MainActivity : ComponentActivity() {
                     Text(task.name, style = MaterialTheme.typography.titleSmall,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(when {
-                        running -> "运行中"
                         schedule != null -> "定时：${schedule.describe()}"
                         else -> taskSubtitles[task.name]?.ifBlank { "待运行" } ?: "待运行"
                     },
@@ -1138,41 +1123,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** 权限页：三项能力与当前运行状态。 */
+    /** 权限页：三项能力与截屏通道设置。 */
     @Composable
-    private fun PermissionsTab(runState: ScriptRunner.RunState) {
+    private fun PermissionsTab() {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            PageHeading("运行准备", "按需开启权限，随时查看运行状态。")
+            PageHeading("运行准备", "按需开启权限，准备好脚本运行环境。")
             PermissionCard(compact = false)
-            WorkCard(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(bottom = 6.dp)) {
-                    SectionTitle("运行状态", if (runState.running) "任务执行中" else "空闲")
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 14.dp, end = 6.dp, top = 2.dp, bottom = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                if (runState.running) runState.taskName ?: "任务执行中" else "当前无任务运行",
-                                style = MaterialTheme.typography.bodyLarge
-                            )
-                            Text(
-                                if (runState.running) "可在顶部运行条或悬浮球停止" else "点击悬浮球，选择任务运行",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        if (runState.running) {
-                            TextButton(onClick = { ScriptRunner.stop() }) { Text("停止") }
-                        } else {
-                            TextButton(onClick = { mainTab = 0 }) { Text("去选任务") }
-                        }
-                    }
-                }
-            }
         }
     }
 

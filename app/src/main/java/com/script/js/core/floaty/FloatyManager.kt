@@ -22,11 +22,11 @@ import android.widget.TextView
  * 悬浮窗管理：统一为一个悬浮控件（依赖 SYSTEM_ALERT_WINDOW 权限）。
  *
  * 控件有状态，就地变形而不是叠加多个窗口：
- * - 空闲态：胶囊「JS」，点击展开面板，拖动可移动并自动贴边（位置会记住）；
- * - 运行态：变成圆形停止按钮（不显示任务名），可拖动，长按 3 秒停止任务（按钮显示倒计时）。
+ * - 空闲态：圆球「JS」，点击展开面板，拖动可移动并自动贴边（位置会记住）；
+ * - 运行态：屏幕顶部矩形条显示任务名与「停止」按钮，单击即可停止。
  *
  * 贴边后空闲球半隐藏：约一半探出屏外，点击先弹出完整显示，再次点击才展开面板；
- * 运行态胶囊完整贴边（停止键保持可见）。半隐藏位置会持久化，重启后保持贴边形态。
+ * 半隐藏位置会持久化，重启后保持贴边形态。
  *
  * 展开的面板按「任务 / 工具」分区：任务列表可滚动，工具区提供坐标拾取、取色器、悬浮日志，
  * 底部提供「关闭悬浮窗」入口（关闭后可在 App「工具」页重新开启）。
@@ -49,16 +49,14 @@ object FloatyManager {
     private const val SNAP_MARGIN_DP = 6
 
     /** 空闲球尺寸（dp），与 ballView 保持一致 */
-    private const val BALL_SIZE_DP = 52
+    private const val BALL_SIZE_DP = 35
+
+    /** 运行条尺寸：原 320×52dp 缩小约三分之一。 */
+    private const val RUNNING_BAR_WIDTH_DP = 213
+    private const val RUNNING_BAR_HEIGHT_DP = 35
 
     /** 贴边半隐藏：探出屏外的部分占球宽的比例（剩余半圆留在屏内，可点击弹出） */
     private const val PEEK_HIDDEN_RATIO = 0.5f
-
-    /** 运行态长按停止任务的按压时长（ms） */
-    private const val LONG_PRESS_STOP_MS = 3000L
-
-    /** 停止按钮文案视图的 tag（长按倒计时更新用） */
-    private const val TAG_STOP_LABEL = "stop_label"
 
     // 配色（悬浮窗自成体系，不跟随 App 主题，保证在任何应用之上都可读）
     private const val COLOR_BG = 0xFF1D2B46.toInt()
@@ -91,9 +89,6 @@ object FloatyManager {
     private var windowManager: WindowManager? = null
     private var appContext: Context? = null
 
-    /** 计时刷新用（主线程） */
-    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-
     /** 统一的悬浮控件（胶囊） */
     private var capsuleView: LinearLayout? = null
     private var capsuleParams: WindowManager.LayoutParams? = null
@@ -106,6 +101,10 @@ object FloatyManager {
 
     /** 当前贴边形态（LEFT/RIGHT = 半隐藏在屏幕边缘，NONE = 完整显示） */
     private var dockedSide = DockSide.NONE
+
+    /** 运行前的空闲球位置与贴边状态；结束后恢复，不让顶部运行条覆盖用户的位置。 */
+    private var idlePosition: Pair<Int, Int>? = null
+    private var idleDockedSide = DockSide.NONE
 
     /** 当前运行中的任务名（null = 空闲态） */
     @Volatile
@@ -168,9 +167,14 @@ object FloatyManager {
         val view = capsuleView ?: return
         val params = capsuleParams ?: return
         val wm = windowManager ?: return
+        if (runningTask != null) {
+            hideTaskPanel()
+            view.post { positionRunningBar(context) }
+            return
+        }
         val m = context.resources.displayMetrics
-        val w = view.width.takeIf { it > 0 } ?: (52 * m.density).toInt()
-        val h = view.height.takeIf { it > 0 } ?: (52 * m.density).toInt()
+        val w = view.width.takeIf { it > 0 } ?: (BALL_SIZE_DP * m.density).toInt()
+        val h = view.height.takeIf { it > 0 } ?: (BALL_SIZE_DP * m.density).toInt()
         params.x = if (dockedSide == DockSide.NONE) {
             params.x.coerceIn(0, (m.widthPixels - w).coerceAtLeast(0))
         } else {
@@ -221,7 +225,7 @@ object FloatyManager {
         val capsule = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            // 背景/内边距按状态在 renderCapsule 中设置（空闲=圆球，运行=胶囊）
+            // 背景/内边距按状态在 renderCapsule 中设置。
         }
         val metrics = context.resources.displayMetrics
         val defaultX = (12 * density).toInt()
@@ -244,16 +248,13 @@ object FloatyManager {
             y = posY
         )
 
-        // 拖动移动；未拖动（点按）统一在此处理：
-        // - 空闲态：半隐藏先弹出，再点展开/收起面板；
-        // - 运行态：按住不动满 3 秒停止任务（按钮显示 3→2→1 倒计时），松手提前只给提示。
-        // 全部走触摸监听（不依赖内部按钮 onClick），拖动不会误触发、判定稳定。
+        // 空闲球与运行条均可拖动；运行条内的停止按钮自行处理点击。
         var downX = 0f
         var downY = 0f
         var startX = 0
         var startY = 0
         var moved = false
-        var wasRunningOnDown = false
+        var runningOnDown = false
         capsule.setOnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
@@ -262,46 +263,50 @@ object FloatyManager {
                     startX = params.x
                     startY = params.y
                     moved = false
-                    wasRunningOnDown = runningTask != null
-                    // 运行态：按下即开始长按停止计时（拖动会自动取消）
-                    if (runningTask != null) beginLongPressStop()
+                    runningOnDown = runningTask != null
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = (event.rawX - downX).toInt()
                     val dy = (event.rawY - downY).toInt()
                     if (moved || dx * dx + dy * dy > 25) {
-                        if (!moved) cancelLongPressStop() // 开始拖动：取消长按倒计时
                         moved = true
-                        hideTaskPanel()
-                        params.x = startX + dx
-                        params.y = startY + dy
-                        wm.updateViewLayout(capsule, params)
+                        if (runningOnDown) {
+                            val metrics = context.resources.displayMetrics
+                            val barW = capsule.width.takeIf { it > 0 }
+                                ?: (RUNNING_BAR_WIDTH_DP * density).toInt()
+                            val barH = capsule.height.takeIf { it > 0 }
+                                ?: (RUNNING_BAR_HEIGHT_DP * density).toInt()
+                            val maxOffsetX = ((metrics.widthPixels - barW) / 2).coerceAtLeast(0)
+                            params.x = (startX + dx).coerceIn(-maxOffsetX, maxOffsetX)
+                            params.y = (startY + dy).coerceIn(0, (metrics.heightPixels - barH).coerceAtLeast(0))
+                        } else {
+                            hideTaskPanel()
+                            params.x = startX + dx
+                            params.y = startY + dy
+                        }
+                        try {
+                            wm.updateViewLayout(capsule, params)
+                        } catch (_: Exception) {
+                        }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
-                    cancelLongPressStop()
-                    when {
-                        moved -> snapToEdge(context, wm, capsule, params)
-                        // 半隐藏贴边第一次点击：先完整弹出，下一次点击才展开面板
-                        popOutIfDocked(context, wm, capsule, params) -> Unit
-                        // 长按满 3 秒已触发停止（任务已结束）：松手不做任何事
-                        wasRunningOnDown && runningTask == null -> Unit
-                        runningTask != null -> {
-                            // 未按满 3 秒：提示正确停止方式
-                            Log.i(TAG, "悬浮控件停止按钮点按（长按 3 秒可停止任务）")
-                            android.widget.Toast.makeText(
-                                context, "长按 3 秒停止任务", android.widget.Toast.LENGTH_SHORT
-                            ).show()
+                    if (!runningOnDown) {
+                        when {
+                            moved -> snapToEdge(context, wm, capsule, params)
+                            // 半隐藏贴边第一次点击：先完整弹出，下一次点击才展开面板
+                            popOutIfDocked(context, wm, capsule, params) -> Unit
+                            else -> toggleTaskPanel(context, wm)
                         }
-                        else -> toggleTaskPanel(context, wm)
                     }
+                    runningOnDown = false
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
-                    cancelLongPressStop()
                     moved = false
+                    runningOnDown = false
                     true
                 }
                 else -> false
@@ -325,7 +330,6 @@ object FloatyManager {
 
     /** 隐藏悬浮控件（含面板；面板收起时不恢复球，因为整体都要隐藏） */
     fun hideLauncher(context: Context? = null, stopKeepAlive: Boolean = true) {
-        cancelLongPressStop()
         hideTaskPanel(restoreBall = false)
         capsuleView?.let {
             try {
@@ -343,53 +347,51 @@ object FloatyManager {
         Log.i(TAG, "悬浮控件已隐藏")
     }
 
-    /** 切换到运行态：悬浮控件就地变成圆形停止按钮（单击提示，双击停止） */
+    /** 切换到运行态：顶部矩形条显示任务名和单击停止按钮。 */
     fun setRunning(context: Context, taskName: String) {
-        val wasIdle = runningTask == null
-        runningTask = taskName
-        if (wasIdle) runningStartedAt = System.currentTimeMillis()
         hideTaskPanel()
-        if (capsuleView == null) {
+        if (capsuleView?.isAttachedToWindow != true) {
             if (!showLauncher(context)) {
                 Log.w(TAG, "运行态悬浮控件显示失败")
                 return
             }
         }
-        // 半隐藏贴边球就地变成圆形停止按钮：不再探出屏外（避免挡住停止按钮）
+        if (runningTask == null) {
+            capsuleParams?.let { idlePosition = it.x to it.y }
+            idleDockedSide = dockedSide
+        }
+        runningTask = taskName
         dockedSide = DockSide.NONE
         renderCapsule(context)
-        startTicker(context)
         Log.i(TAG, "悬浮控件进入运行态: $taskName")
     }
 
     /** 回到空闲态（任务结束/停止后调用） */
     fun clearRunning(context: Context) {
         runningTask = null
-        cancelLongPressStop()
-        stopTicker()
-        renderCapsule(context)
-        // 胶囊收缩回圆球后贴回最近的边缘：避免停在屏幕中间（胶囊从边缘向内展开后的残留位置）
-        capsuleView?.let { v ->
-            windowManager?.let { wm ->
-                capsuleParams?.let { p ->
-                    v.post {
-                        snapToEdge(context, wm, v, p)
-                    }
-                }
+        val savedPosition = idlePosition
+        dockedSide = idleDockedSide
+        capsuleParams?.let { params ->
+            savedPosition?.let { (x, y) ->
+                params.x = x
+                params.y = y
             }
+            params.gravity = Gravity.TOP or Gravity.START
         }
+        renderCapsule(context)
+        idlePosition = null
+        idleDockedSide = DockSide.NONE
         Log.i(TAG, "悬浮控件回到空闲态")
     }
 
     /**
      * 按当前状态重建胶囊内容：
-     * - 空闲：52dp 圆球「JS」+ 右下角状态点（绿=就绪），半透明避免遮挡；
-     * - 运行：一个圆形停止按钮（不显示任务名），单击提示、双击停止任务。
+     * - 空闲：35dp 圆球「JS」+ 右下角状态点（绿=就绪）；
+     * - 运行：顶部矩形条，显示任务名和停止按钮。
      */
     @SuppressLint("SetTextI18n")
     private fun renderCapsule(context: Context) {
         val capsule = capsuleView ?: return
-        val d = context.resources.displayMetrics.density
         capsule.removeAllViews()
         val task = runningTask
         if (task == null) {
@@ -398,19 +400,19 @@ object FloatyManager {
             capsule.alpha = 0.92f
             capsule.addView(ballView(context))
         } else {
-            // 运行态：整个悬浮控件就是一个圆形停止按钮（任务名等细节看运行日志/通知栏）
             capsule.setPadding(0, 0, 0, 0)
             capsule.background = null
             capsule.alpha = 1f
-            capsule.addView(stopButton(context))
+            capsule.addView(runningBar(context, task))
         }
         capsuleView?.let { view ->
             try {
                 capsuleParams?.let { windowManager?.updateViewLayout(view, it) }
             } catch (_: Exception) {
             }
-            // 圆球 ↔ 胶囊宽度不同：测量后把窗口收进屏幕内（贴右边缘时向左展开，避免被裁掉）
-            view.post { keepInsideScreen(context) }
+            view.post {
+                if (runningTask != null) positionRunningBar(context) else keepInsideScreen(context)
+            }
         }
     }
 
@@ -440,6 +442,20 @@ object FloatyManager {
         }
     }
 
+    /** 由系统水平居中，避开 ROM 报告的屏幕宽度与实际显示帧不一致。 */
+    private fun positionRunningBar(context: Context) {
+        if (runningTask == null) return
+        val view = capsuleView ?: return
+        val params = capsuleParams ?: return
+        params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        params.x = 0
+        params.y = (8 * context.resources.displayMetrics.density).toInt()
+        try {
+            windowManager?.updateViewLayout(view, params)
+        } catch (_: Exception) {
+        }
+    }
+
     /** 参与贴边计算的悬浮控件宽度：空闲用固定球宽（状态切换瞬间测量值可能是旧胶囊宽度） */
     private fun stagedViewW(context: Context, view: View): Int {
         val density = context.resources.displayMetrics.density
@@ -450,11 +466,11 @@ object FloatyManager {
     /** 空闲态：圆形球 + 状态点 */
     private fun ballView(context: Context): View {
         val d = context.resources.displayMetrics.density
-        val size = (52 * d).toInt()
+        val size = (BALL_SIZE_DP * d).toInt()
         val frame = android.widget.FrameLayout(context)
         frame.addView(
             View(context).apply {
-                background = roundedBackground(COLOR_BG_SOLID, 26 * d, 1.5f * d, 0x33FFFFFF)
+                background = roundedBackground(COLOR_BG_SOLID, BALL_SIZE_DP * d / 2, 1.5f * d, 0x33FFFFFF)
             },
             android.widget.FrameLayout.LayoutParams(size, size)
         )
@@ -462,23 +478,23 @@ object FloatyManager {
             android.widget.ImageView(context).apply {
                 setImageResource(com.script.js.R.drawable.ic_brand_mark)
                 scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
-                setPadding((2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt(), (2 * d).toInt())
+                setPadding((1 * d).toInt(), (1 * d).toInt(), (1 * d).toInt(), (1 * d).toInt())
             },
             android.widget.FrameLayout.LayoutParams(size, size)
         )
         // 右下角状态点：空闲=绿（就绪）
         frame.addView(
             statusDot(context),
-            android.widget.FrameLayout.LayoutParams((12 * d).toInt(), (12 * d).toInt()).apply {
+            android.widget.FrameLayout.LayoutParams((8 * d).toInt(), (8 * d).toInt()).apply {
                 gravity = Gravity.BOTTOM or Gravity.END
-                marginEnd = (2 * d).toInt()
-                bottomMargin = (2 * d).toInt()
+                marginEnd = (1 * d).toInt()
+                bottomMargin = (1 * d).toInt()
             }
         )
         return frame
     }
 
-    /** 运行态左侧的状态点（绿=运行中） */
+    /** 状态点。 */
     private fun statusDot(context: Context): View {
         val d = context.resources.displayMetrics.density
         return View(context).apply {
@@ -488,87 +504,39 @@ object FloatyManager {
         }
     }
 
-    /**
-     * 运行态停止按钮：深灰底白色方块（尺寸与空闲球一致）。
-     * 长按 3 秒停止的手势由悬浮控件触摸监听处理，这里只负责外观；
-     * 文案视图带 [TAG_STOP_LABEL] 标记，长按倒计时（3→2→1）由 [beginLongPressStop] 更新。
-     */
-    private fun stopButton(context: Context): View {
+    /** 顶部任务条：任务名占剩余空间，停止按钮可单击。 */
+    private fun runningBar(context: Context, task: String): View {
         val d = context.resources.displayMetrics.density
-        val size = (BALL_SIZE_DP * d).toInt()
-        return textView(context, "■", 18f, 0xFFFFFFFF.toInt()).apply {
-            gravity = Gravity.CENTER
-            background = roundedBackground(COLOR_STOP, 26 * d, 1.5f * d, 0x66FFFFFF)
-            tag = TAG_STOP_LABEL
-        }.also { view ->
-            view.layoutParams = LinearLayout.LayoutParams(size, size)
+        val width = (RUNNING_BAR_WIDTH_DP * d).toInt()
+            .coerceAtMost((context.resources.displayMetrics.widthPixels - 24 * d).toInt())
+            .coerceAtLeast(1)
+        val bar = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = roundedBackground(COLOR_BG, 7 * d, 1 * d, 0x33FFFFFF)
+            setPadding((8 * d).toInt(), 0, (5 * d).toInt(), 0)
         }
-    }
-
-    /** 长按停止的待执行回调（用于取消） */
-    private val longPressRunnables = mutableListOf<Runnable>()
-
-    /**
-     * 运行态长按 [LONG_PRESS_STOP_MS] 停止任务：按住期间按钮显示 3→2→1 倒计时。
-     * 在 ACTION_DOWN 时调用；拖动/提前松手/任务结束时用 [cancelLongPressStop] 取消。
-     */
-    private fun beginLongPressStop() {
-        cancelLongPressStop()
-        if (runningTask == null) return
-        val label = capsuleView?.findViewWithTag<TextView>(TAG_STOP_LABEL) ?: return
-        label.text = "3"
-        longPressRunnables += Runnable { label.text = "2" }
-            .also { handler.postDelayed(it, 1000L) }
-        longPressRunnables += Runnable { label.text = "1" }
-            .also { handler.postDelayed(it, 2000L) }
-        longPressRunnables += Runnable {
-            longPressRunnables.clear()
-            label.text = "■"
-            Log.i(TAG, "悬浮控件长按${LONG_PRESS_STOP_MS / 1000}秒停止, 回调已绑定=${onStopClicked != null}")
-            onStopClicked?.invoke()
-        }.also { handler.postDelayed(it, LONG_PRESS_STOP_MS) }
-    }
-
-    /** 取消未完成的长按停止（拖动/提前松手/任务结束时调用），恢复按钮文案 */
-    private fun cancelLongPressStop() {
-        if (longPressRunnables.isNotEmpty()) {
-            longPressRunnables.forEach { handler.removeCallbacks(it) }
-            longPressRunnables.clear()
-        }
-        if (runningTask != null) {
-            capsuleView?.findViewWithTag<TextView>(TAG_STOP_LABEL)?.text = "■"
-        }
-    }
-
-    // ==================== 运行计时 ====================
-
-    private var runningStartedAt = 0L
-    private var timerView: TextView? = null
-
-    private val ticker = object : Runnable {
-        override fun run() {
-            // 运行态已简化为圆形停止按钮（无计时显示）：没有计时视图时不再循环，避免每秒空转
-            val tv = timerView
-            if (tv != null) {
-                tv.text = elapsedText()
-                if (runningTask != null) handler.postDelayed(this, 1000L)
-            }
-        }
-    }
-
-    private fun startTicker(context: Context) {
-        handler.removeCallbacks(ticker)
-        handler.postDelayed(ticker, 1000L)
-    }
-
-    private fun stopTicker() {
-        handler.removeCallbacks(ticker)
-        timerView = null
-    }
-
-    private fun elapsedText(): String {
-        val s = ((System.currentTimeMillis() - runningStartedAt) / 1000).coerceAtLeast(0)
-        return "%02d:%02d".format(s / 60, s % 60)
+        bar.addView(statusDot(context), LinearLayout.LayoutParams((6 * d).toInt(), (6 * d).toInt()))
+        bar.addView(
+            textView(context, task, 12f, COLOR_TEXT).apply {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding((7 * d).toInt(), 0, (4 * d).toInt(), 0)
+            },
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        bar.addView(
+            textView(context, "停止", 12f, COLOR_TEXT).apply {
+                gravity = Gravity.CENTER
+                background = roundedBackground(COLOR_STOP, 5 * d, 0f, 0)
+                isClickable = true
+                contentDescription = "停止任务 $task"
+                setOnClickListener { onStopClicked?.invoke() }
+            },
+            LinearLayout.LayoutParams((46 * d).toInt(), (27 * d).toInt())
+        )
+        bar.layoutParams = LinearLayout.LayoutParams(width, (RUNNING_BAR_HEIGHT_DP * d).toInt())
+        return bar
     }
 
     // ==================== 视图小工具 ====================
